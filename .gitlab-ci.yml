@@ -15,19 +15,20 @@ stages:
   - deploy
 
 variables:
-  NODE_VERSION: '20'
+  NODE_VERSION: "20"
   AWS_REGION: ap-south-1
   DOCKER_DRIVER: overlay2
-  DOCKER_TLS_CERTDIR: ''
-  # ── Required CI/CD Variables (set in GitLab → Settings → CI/CD → Variables) ──
-  # AWS_ACCESS_KEY_ID:       (masked+protected) IAM ci_deploy user access key
-  # AWS_SECRET_ACCESS_KEY:   (masked+protected) IAM ci_deploy user secret key
-  # ECR_REGISTRY:            690081480550.dkr.ecr.ap-south-1.amazonaws.com
-  # ECR_REPO_BACKEND:        ops-erp-backend-dev
-  # ECR_REPO_FRONTEND:       ops-erp-frontend-dev
-  # ECS_CLUSTER:             ops-erp-cluster-dev
-  # ECS_SERVICE_BACKEND:     ops-erp-backend-dev
-  # ECS_SERVICE_FRONTEND:    ops-erp-frontend-dev
+  DOCKER_TLS_CERTDIR: ""
+  # Non-secret infrastructure values — hardcoded (no GitLab variable needed)
+  ECR_REGISTRY: "690081480550.dkr.ecr.ap-south-1.amazonaws.com"
+  ECR_REPO_BACKEND: "ops-erp-backend-dev"
+  ECR_REPO_FRONTEND: "ops-erp-frontend-dev"
+  ECS_CLUSTER: "ops-erp-cluster-dev"
+  ECS_SERVICE_BACKEND: "ops-erp-backend-dev"
+  ECS_SERVICE_FRONTEND: "ops-erp-frontend-dev"
+  # Secrets — only these two need to be set in GitLab Settings → CI/CD → Variables
+  # AWS_ACCESS_KEY_ID     (masked+protected) — already added
+  # AWS_SECRET_ACCESS_KEY (masked+protected) — already added
 
 # ── VALIDATE ──────────────────────────────────────────────────────────────────
 
