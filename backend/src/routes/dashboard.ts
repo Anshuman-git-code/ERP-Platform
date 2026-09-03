@@ -20,7 +20,6 @@ router.get('/', authorize(...ALL_ROLES), async (_req: AuthenticatedRequest, res:
     dispatchedTransfers,
     pendingOrders,
     confirmedOrders,
-    lowStockCount,
   ] = await Promise.all([
     prisma.item.count(),
     prisma.location.count(),
@@ -32,12 +31,6 @@ router.get('/', authorize(...ALL_ROLES), async (_req: AuthenticatedRequest, res:
     prisma.stockTransfer.count({ where: { status: TransferStatus.DISPATCHED } }),
     prisma.customerOrder.count({ where: { status: OrderStatus.PENDING } }),
     prisma.customerOrder.count({ where: { status: OrderStatus.CONFIRMED } }),
-    // Low stock: inventory records where availableQty (physicalQty - reservedQty) < 5
-    prisma.inventory.count({
-      where: {
-        // physicalQty - reservedQty < 5 expressed via Prisma raw filter
-      },
-    }),
   ]);
 
   // Compute total available qty across all inventory

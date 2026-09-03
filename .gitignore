@@ -32,3 +32,9 @@ npm-debug.log*
 
 # Prisma generated — regenerated on install
 # (keep migrations committed)
+
+# Terraform — ignore provider download cache, keep lock file
+infra/terraform/.terraform/
+infra/terraform/terraform.tfvars
+infra/terraform/*.tfstate
+infra/terraform/*.tfstate.backup
