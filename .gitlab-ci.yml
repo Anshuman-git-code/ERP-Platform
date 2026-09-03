@@ -193,8 +193,9 @@ package:frontend:
 # ── DEPLOY ────────────────────────────────────────────────────────────────────
 # Manual gate — only runs on main after package succeeds.
 #
-# Uses crane (daemon-less image copy) + aws-cli.
-# .ci/update-task-def.py handles ECS task definition JSON surgery.
+# Uses alpine + crane (pre-built binary) + awscli (pip).
+# No Docker daemon required. crane copies images registry-to-registry.
+# .ci/update-task-def.py handles ECS task definition JSON.
 #
 # Required CI/CD variables (Settings → CI/CD → Variables, masked + protected):
 #   AWS_ACCESS_KEY_ID       IAM ci_deploy user
@@ -206,19 +207,19 @@ package:frontend:
 #   ECS_SERVICE_BACKEND:    ops-erp-backend-dev
 #   ECS_SERVICE_FRONTEND:   ops-erp-frontend-dev
 
-.deploy_install: &deploy_install
+.deploy_before: &deploy_before
+  - apk add --no-cache curl python3 py3-pip
+  - pip3 install awscli --quiet --break-system-packages
   - CRANE_VER=$(curl -sf https://api.github.com/repos/google/go-containerregistry/releases/latest | grep '"tag_name"' | cut -d'"' -f4)
-  - curl -sL "https://github.com/google/go-containerregistry/releases/download/${CRANE_VER}/go-containerregistry_Linux_x86_64.tar.gz" -o crane.tar.gz
-  - tar -xzf crane.tar.gz crane && chmod +x crane && mv crane /usr/local/bin/crane
+  - curl -sL "https://github.com/google/go-containerregistry/releases/download/${CRANE_VER}/go-containerregistry_Linux_x86_64.tar.gz" | tar -xz crane
+  - chmod +x crane && mv crane /usr/local/bin/crane
   - crane auth login $CI_REGISTRY -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD
   - crane auth login $ECR_REGISTRY -u AWS -p "$(aws ecr get-login-password --region $AWS_REGION)"
 
 deploy:backend:
   stage: deploy
-  image:
-    name: amazon/aws-cli:2.15.0
-    entrypoint: [""]
-  before_script: *deploy_install
+  image: alpine:3.19
+  before_script: *deploy_before
   script:
     - crane copy $CI_REGISTRY_IMAGE/backend:$CI_COMMIT_SHORT_SHA $ECR_REGISTRY/$ECR_REPO_BACKEND:$CI_COMMIT_SHORT_SHA
     - crane tag $ECR_REGISTRY/$ECR_REPO_BACKEND:$CI_COMMIT_SHORT_SHA latest
@@ -234,10 +235,8 @@ deploy:backend:
 
 deploy:frontend:
   stage: deploy
-  image:
-    name: amazon/aws-cli:2.15.0
-    entrypoint: [""]
-  before_script: *deploy_install
+  image: alpine:3.19
+  before_script: *deploy_before
   script:
     - crane copy $CI_REGISTRY_IMAGE/frontend:$CI_COMMIT_SHORT_SHA $ECR_REGISTRY/$ECR_REPO_FRONTEND:$CI_COMMIT_SHORT_SHA
     - crane tag $ECR_REGISTRY/$ECR_REPO_FRONTEND:$CI_COMMIT_SHORT_SHA latest
