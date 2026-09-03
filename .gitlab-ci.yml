@@ -1,0 +1,238 @@
+# ─── Mini Operations ERP — GitLab CI/CD Pipeline ─────────────────────────────
+#
+# Stages:
+#   validate  → lint + typecheck (all branches)
+#   test      → integration tests against real Postgres (all branches)
+#   build     → tsc + vite build artifacts (all branches)
+#   package   → Docker images pushed to GitLab Container Registry (main + develop)
+#   deploy    → ECS Fargate deployment (main only, MANUAL gate)
+
+stages:
+  - validate
+  - test
+  - build
+  - package
+  - deploy
+
+variables:
+  NODE_VERSION: '20'
+  # Override in CI/CD settings → Variables (masked + protected):
+  #   AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY
+  #   ECR_REGISTRY, ECR_REPO_BACKEND, ECR_REPO_FRONTEND
+  #   AWS_REGION (default ap-south-1)
+  AWS_REGION: ap-south-1
+  DOCKER_DRIVER: overlay2
+  DOCKER_TLS_CERTDIR: ''
+
+# ── VALIDATE ──────────────────────────────────────────────────────────────────
+
+backend:lint:
+  stage: validate
+  image: node:20-alpine
+  cache:
+    key: backend-node-$CI_COMMIT_REF_SLUG
+    paths: [backend/node_modules/]
+  before_script:
+    - cd backend && npm ci --legacy-peer-deps
+  script:
+    - npm run lint
+  rules:
+    - when: always
+
+backend:typecheck:
+  stage: validate
+  image: node:20-alpine
+  cache:
+    key: backend-node-$CI_COMMIT_REF_SLUG
+    paths: [backend/node_modules/]
+  before_script:
+    - cd backend && npm ci --legacy-peer-deps && npx prisma generate
+  script:
+    - npm run typecheck
+  rules:
+    - when: always
+
+frontend:lint:
+  stage: validate
+  image: node:20-alpine
+  cache:
+    key: frontend-node-$CI_COMMIT_REF_SLUG
+    paths: [frontend/node_modules/]
+  before_script:
+    - cd frontend && npm ci --legacy-peer-deps
+  script:
+    - npm run lint
+  rules:
+    - when: always
+
+frontend:typecheck:
+  stage: validate
+  image: node:20-alpine
+  cache:
+    key: frontend-node-$CI_COMMIT_REF_SLUG
+    paths: [frontend/node_modules/]
+  before_script:
+    - cd frontend && npm ci --legacy-peer-deps
+  script:
+    - npm run typecheck
+  rules:
+    - when: always
+
+# ── TEST ──────────────────────────────────────────────────────────────────────
+
+backend:test:
+  stage: test
+  image: node:20-alpine
+  services:
+    - name: postgres:15-alpine
+      alias: postgres
+      variables:
+        POSTGRES_DB: ops_erp_test
+        POSTGRES_USER: erp_user
+        POSTGRES_PASSWORD: devpassword123
+  variables:
+    TEST_DATABASE_URL: postgresql://erp_user:devpassword123@postgres:5432/ops_erp_test?schema=public
+    JWT_SECRET: ci_test_secret_not_for_production_abcdef1234567890
+    NODE_ENV: test
+    LOG_LEVEL: error
+  cache:
+    key: backend-node-$CI_COMMIT_REF_SLUG
+    paths: [backend/node_modules/]
+  before_script:
+    - apk add --no-cache openssl
+    - cd backend
+    - npm ci --legacy-peer-deps
+    - npx prisma generate
+    - DATABASE_URL=$TEST_DATABASE_URL npx prisma migrate deploy
+  script:
+    - npm test
+  coverage: '/Lines\s*:\s*(\d+\.?\d*)%/'
+  artifacts:
+    reports:
+      coverage_report:
+        coverage_format: cobertura
+        path: backend/coverage/cobertura-coverage.xml
+    paths: [backend/coverage/]
+    expire_in: 7 days
+  rules:
+    - when: always
+
+# ── BUILD ─────────────────────────────────────────────────────────────────────
+
+backend:build:
+  stage: build
+  image: node:20-alpine
+  cache:
+    key: backend-node-$CI_COMMIT_REF_SLUG
+    paths: [backend/node_modules/]
+  before_script:
+    - apk add --no-cache openssl
+    - cd backend
+    - npm ci --legacy-peer-deps
+    - npx prisma generate
+  script:
+    - npm run build
+  artifacts:
+    paths: [backend/dist/]
+    expire_in: 1 day
+  rules:
+    - when: always
+
+frontend:build:
+  stage: build
+  image: node:20-alpine
+  cache:
+    key: frontend-node-$CI_COMMIT_REF_SLUG
+    paths: [frontend/node_modules/]
+  before_script:
+    - cd frontend && npm ci --legacy-peer-deps
+  script:
+    - npm run build
+  artifacts:
+    paths: [frontend/dist/]
+    expire_in: 1 day
+  rules:
+    - when: always
+
+# ── PACKAGE ───────────────────────────────────────────────────────────────────
+
+.docker_package: &docker_package
+  stage: package
+  image: docker:24-dind
+  services: [docker:24-dind]
+  before_script:
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH == "develop"
+
+package:backend:
+  <<: *docker_package
+  script:
+    - |
+      docker build -t $CI_REGISTRY_IMAGE/backend:$CI_COMMIT_SHORT_SHA \
+                   -t $CI_REGISTRY_IMAGE/backend:latest \
+                   ./backend
+      docker push $CI_REGISTRY_IMAGE/backend:$CI_COMMIT_SHORT_SHA
+      docker push $CI_REGISTRY_IMAGE/backend:latest
+
+package:frontend:
+  <<: *docker_package
+  script:
+    - |
+      docker build -t $CI_REGISTRY_IMAGE/frontend:$CI_COMMIT_SHORT_SHA \
+                   -t $CI_REGISTRY_IMAGE/frontend:latest \
+                   ./frontend
+      docker push $CI_REGISTRY_IMAGE/frontend:$CI_COMMIT_SHORT_SHA
+      docker push $CI_REGISTRY_IMAGE/frontend:latest
+
+# ── DEPLOY ────────────────────────────────────────────────────────────────────
+# Manual gate — only runs on main after package succeeds.
+# Requires CI/CD variables: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY,
+#   ECR_REGISTRY, ECR_REPO_BACKEND, ECR_REPO_FRONTEND, ECS_CLUSTER,
+#   ECS_SERVICE_BACKEND, ECS_SERVICE_FRONTEND
+
+.deploy_common: &deploy_common
+  stage: deploy
+  image:
+    name: amazon/aws-cli:2.15.0
+    entrypoint: ['']
+  before_script:
+    - aws configure set region $AWS_REGION
+    - aws ecr get-login-password --region $AWS_REGION |
+        docker login --username AWS --password-stdin $ECR_REGISTRY
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+      when: manual
+  environment: production
+
+deploy:backend:
+  <<: *deploy_common
+  script:
+    - |
+      docker pull $CI_REGISTRY_IMAGE/backend:$CI_COMMIT_SHORT_SHA
+      docker tag  $CI_REGISTRY_IMAGE/backend:$CI_COMMIT_SHORT_SHA \
+                  $ECR_REGISTRY/$ECR_REPO_BACKEND:$CI_COMMIT_SHORT_SHA
+      docker push $ECR_REGISTRY/$ECR_REPO_BACKEND:$CI_COMMIT_SHORT_SHA
+      aws ecs update-service \
+        --cluster $ECS_CLUSTER \
+        --service $ECS_SERVICE_BACKEND \
+        --force-new-deployment
+      aws ecs wait services-stable \
+        --cluster $ECS_CLUSTER \
+        --services $ECS_SERVICE_BACKEND
+
+deploy:frontend:
+  <<: *deploy_common
+  script:
+    - |
+      docker pull $CI_REGISTRY_IMAGE/frontend:$CI_COMMIT_SHORT_SHA
+      docker tag  $CI_REGISTRY_IMAGE/frontend:$CI_COMMIT_SHORT_SHA \
+                  $ECR_REGISTRY/$ECR_REPO_FRONTEND:$CI_COMMIT_SHORT_SHA
+      docker push $ECR_REGISTRY/$ECR_REPO_FRONTEND:$CI_COMMIT_SHORT_SHA
+      aws ecs update-service \
+        --cluster $ECS_CLUSTER \
+        --service $ECS_SERVICE_FRONTEND \
+        --force-new-deployment
+      aws ecs wait services-stable \
+        --cluster $ECS_CLUSTER \
+        --services $ECS_SERVICE_FRONTEND

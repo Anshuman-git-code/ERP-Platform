@@ -1,0 +1,19 @@
+# Copy to terraform.tfvars and fill in real values.
+# NEVER commit terraform.tfvars — it contains secrets.
+
+aws_region   = "ap-south-1"
+environment  = "dev"
+project_name = "ops-erp"
+
+# Database
+db_password = "CHANGE_ME_strong_password_here"
+
+# JWT secret — minimum 64 characters
+jwt_secret = "CHANGE_ME_at_least_64_chars_random_string_here_abcdef1234567890abc"
+
+# Set after first `terraform apply` (from outputs.alb_dns_name)
+cors_origin = "http://PLACEHOLDER_ALB_DNS"
+
+# Set after CI/CD pushes images (from ECR repository URLs)
+backend_image  = "ACCOUNT_ID.dkr.ecr.ap-south-1.amazonaws.com/ops-erp-backend-dev:latest"
+frontend_image = "ACCOUNT_ID.dkr.ecr.ap-south-1.amazonaws.com/ops-erp-frontend-dev:latest"
