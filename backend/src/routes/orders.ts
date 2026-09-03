@@ -106,8 +106,12 @@ router.post(
     const inventoryMap = new Map(inventoryRecords.map((r) => [r.id, r]));
 
     const totalQty = items.reduce((s, i) => s + i.quantity, 0);
-    const count = await prisma.customerOrder.count();
-    const orderNumber = `ORD-${String(count + 1).padStart(5, '0')}`;
+
+    // Generate a collision-safe order number using timestamp + random suffix.
+    // A plain COUNT(*)+1 races under concurrent requests — two requests can read
+    // the same count and generate the same number. The timestamp+random suffix
+    // makes collisions astronomically unlikely without needing a DB sequence.
+    const orderNumber = `ORD-${Date.now()}-${Math.random().toString(36).slice(2, 7).toUpperCase()}`;
 
     const order = await prisma.customerOrder.create({
       data: {

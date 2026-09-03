@@ -114,7 +114,6 @@ router.post(
 
     const count = await prisma.workOrder.count();
     const workOrderNumber = `WO-${String(count + 1).padStart(5, '0')}`;
-
     const workOrder = await prisma.workOrder.create({
       data: {
         workOrderNumber,
