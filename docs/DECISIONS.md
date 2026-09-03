@@ -32,7 +32,7 @@ Validation ensures `physicalQty >= 0`, `reservedQty >= 0`, and `physicalQty >= r
 
 **Decision:** Snapshot `itemName` and `itemSku` onto WorkOrder and StockTransfer at creation time.
 
-**Why:** If an Item's name or SKU is later updated, historical records still display accurate information. This mirrors the `ChallanItem` snapshot pattern from the reference project and is standard practice for audit-sensitive documents.
+**Why:** If an Item's name or SKU is later updated, historical records still display accurate information. This is standard practice for audit-sensitive documents (snapshot at point-in-time).
 
 ## 6. Order number uses timestamp+random suffix
 

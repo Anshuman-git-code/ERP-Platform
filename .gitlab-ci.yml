@@ -88,10 +88,10 @@ backend:test:
       alias: postgres
       variables:
         POSTGRES_DB: ops_erp_test
-        POSTGRES_USER: erp_user
+        POSTGRES_USER: ops_user
         POSTGRES_PASSWORD: devpassword123
   variables:
-    TEST_DATABASE_URL: postgresql://erp_user:devpassword123@postgres:5432/ops_erp_test?schema=public
+    TEST_DATABASE_URL: postgresql://ops_user:devpassword123@postgres:5432/ops_erp_test?schema=public
     JWT_SECRET: ci_test_secret_not_for_production_abcdef1234567890
     NODE_ENV: test
     LOG_LEVEL: error

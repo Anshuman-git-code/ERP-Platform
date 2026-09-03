@@ -5,6 +5,10 @@
  */
 
 // Point at the test database — never the development DB
+// The fallback URL uses 'erp_user' which matches the locally provisioned
+// Docker container (erp_postgres, shared with the dev environment on this machine).
+// In CI, TEST_DATABASE_URL is set via the gitlab-ci.yml variable and uses 'ops_user'
+// with a freshly created postgres:15-alpine service container.
 process.env.DATABASE_URL =
   process.env.TEST_DATABASE_URL ??
   'postgresql://erp_user:devpassword123@localhost:5432/ops_erp_test?schema=public';
