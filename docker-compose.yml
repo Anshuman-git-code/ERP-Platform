@@ -1,0 +1,71 @@
+services:
+  # ── PostgreSQL ──────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:15-alpine
+    container_name: ops_erp_postgres
+    environment:
+      POSTGRES_DB: ops_erp
+      POSTGRES_USER: ops_user
+      POSTGRES_PASSWORD: devpassword123
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - '5444:5432'   # host 5444 — avoids conflicts with CS1 (5432) and erp_verify (5433)
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ops_user -d ops_erp']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  # ── Backend ─────────────────────────────────────────────────────────────────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: ops_erp_backend
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: 4000
+      DATABASE_URL: postgresql://ops_user:devpassword123@postgres:5432/ops_erp?schema=public
+      JWT_SECRET: compose_dev_secret_change_before_production_use_64chars
+      JWT_EXPIRES_IN: 8h
+      CORS_ORIGIN: http://localhost:3002
+      LOG_LEVEL: info
+    ports:
+      - '4002:4000'   # host 4002 — avoids CS1 (4000)
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -qO- http://localhost:4000/health || exit 1']
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 45s
+    restart: unless-stopped
+
+  # ── Frontend ─────────────────────────────────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_API_BASE_URL: /api
+    container_name: ops_erp_frontend
+    depends_on:
+      backend:
+        condition: service_healthy
+    environment:
+      BACKEND_URL: http://backend:4000
+    ports:
+      - '3002:80'     # host 3002 — avoids CS1 (3000)
+    healthcheck:
+      test: ['CMD-SHELL', 'curl -sf http://127.0.0.1:80/ > /dev/null || exit 1']
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
