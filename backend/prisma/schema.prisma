@@ -1,0 +1,280 @@
+// Mini Operations ERP — Prisma Schema
+// Covers: Inventory, Work Orders, Internal Transfers, Customer Orders
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── Enums ────────────────────────────────────────────────────────────────────
+
+enum Role {
+  ADMIN
+  OPERATIONS
+  SALES
+}
+
+enum WorkOrderStatus {
+  ASSIGNED
+  IN_PROGRESS
+  COMPLETED
+}
+
+enum TransferStatus {
+  REQUESTED
+  DISPATCHED
+  RECEIVED
+  CANCELLED
+}
+
+enum OrderStatus {
+  PENDING
+  CONFIRMED
+  CANCELLED
+}
+
+enum TransactionType {
+  IN
+  OUT
+}
+
+// ─── Models ───────────────────────────────────────────────────────────────────
+
+model User {
+  id        String   @id @default(cuid())
+  name      String
+  email     String   @unique
+  password  String
+  role      Role     @default(SALES)
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  workOrdersAssigned  WorkOrder[]          @relation("AssignedTo")
+  workOrdersCreated   WorkOrder[]          @relation("CreatedBy")
+  transfersRequested  StockTransfer[]      @relation("RequestedBy")
+  transfersDispatched StockTransfer[]      @relation("DispatchedBy")
+  transfersReceived   StockTransfer[]      @relation("ReceivedBy")
+  ordersCreated       CustomerOrder[]
+  stockTransactions   InventoryTransaction[]
+
+  @@map("users")
+}
+
+model Location {
+  id        String   @id @default(cuid())
+  name      String   @unique
+  address   String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  inventory     Inventory[]
+  workOrders    WorkOrder[]
+  transfersFrom StockTransfer[] @relation("SourceLocation")
+  transfersTo   StockTransfer[] @relation("DestLocation")
+  orders        CustomerOrder[]
+
+  @@map("locations")
+}
+
+model Item {
+  id        String   @id @default(cuid())
+  name      String
+  sku       String   @unique
+  category  String?
+  unitPrice Decimal  @db.Decimal(10, 2)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  inventory  Inventory[]
+  workOrders WorkOrder[]
+  transfers  StockTransfer[]
+  orderItems OrderItem[]
+
+  @@index([sku])
+  @@map("items")
+}
+
+// ─── Inventory ────────────────────────────────────────────────────────────────
+// One row per (item, location, batch).
+// batchNumber uses 'DEFAULT' when no batch is specified — ensures @@unique works
+// correctly with non-null values (PostgreSQL NULL != NULL breaks uniqueness).
+// physicalQty = actual stock on hand
+// reservedQty = stock held by confirmed customer orders
+// availableQty = physicalQty - reservedQty  (COMPUTED, never stored)
+
+model Inventory {
+  id           String   @id @default(cuid())
+  itemId       String
+  locationId   String
+  batchNumber  String   @default("DEFAULT")
+  physicalQty  Int      @default(0)
+  reservedQty  Int      @default(0)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  item         Item     @relation(fields: [itemId], references: [id])
+  location     Location @relation(fields: [locationId], references: [id])
+  transactions InventoryTransaction[]
+  orderItems   OrderItem[]
+
+  // Prevents duplicate inventory rows for the same item/location/batch combo.
+  // batchNumber is always non-null (defaults to 'DEFAULT') so this constraint
+  // behaves deterministically.
+  @@unique([itemId, locationId, batchNumber])
+  @@index([itemId])
+  @@index([locationId])
+  @@map("inventory")
+}
+
+// ─── Inventory Transaction ────────────────────────────────────────────────────
+// Audit log for every stock movement.
+// The `referenceKey` is an idempotency key — an optional unique string
+// (e.g. "transfer-<id>-dispatch") that prevents the same logical transaction
+// from being recorded twice. Set it whenever the caller controls the key.
+
+model InventoryTransaction {
+  id              String          @id @default(cuid())
+  inventoryId     String
+  transactionType TransactionType
+  quantity        Int
+  reason          String?
+  referenceKey    String?         @unique  // idempotency key — unique when provided
+  createdById     String
+  createdAt       DateTime        @default(now())
+
+  inventory   Inventory @relation(fields: [inventoryId], references: [id])
+  createdBy   User      @relation(fields: [createdById], references: [id])
+
+  @@index([inventoryId])
+  @@index([createdAt])
+  @@map("inventory_transactions")
+}
+
+// ─── Work Order ───────────────────────────────────────────────────────────────
+// Tracks what materials are needed, at which location, for which task.
+// shortageQty is NOT stored — computed at read time from live inventory.
+
+model WorkOrder {
+  id              String          @id @default(cuid())
+  workOrderNumber String          @unique
+  locationId      String
+  itemId          String
+  requiredQty     Int
+  assignedToId    String
+  status          WorkOrderStatus @default(ASSIGNED)
+  notes           String?
+  createdById     String
+  startedAt       DateTime?
+  completedAt     DateTime?
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+
+  // Item name/SKU snapshot — for historical display if item data changes
+  itemName        String
+  itemSku         String
+
+  location    Location @relation(fields: [locationId], references: [id])
+  item        Item     @relation(fields: [itemId], references: [id])
+  assignedTo  User     @relation("AssignedTo", fields: [assignedToId], references: [id])
+  createdBy   User     @relation("CreatedBy", fields: [createdById], references: [id])
+
+  @@index([status])
+  @@index([locationId])
+  @@map("work_orders")
+}
+
+// ─── Stock Transfer ───────────────────────────────────────────────────────────
+// Moves stock from one location to another.
+// Business rules:
+//   DISPATCH  → source physicalQty decrements; destination unchanged
+//   RECEIVE   → destination physicalQty increments; status guard prevents double-receipt
+
+model StockTransfer {
+  id              String         @id @default(cuid())
+  transferNumber  String         @unique
+  sourceLocationId    String
+  destLocationId      String
+  itemId          String
+  quantity        Int
+  status          TransferStatus @default(REQUESTED)
+  notes           String?
+  requestedById   String
+  dispatchedById  String?
+  receivedById    String?
+  dispatchedAt    DateTime?
+  receivedAt      DateTime?
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+
+  // Item snapshot for display
+  itemName        String
+  itemSku         String
+
+  sourceLocation  Location @relation("SourceLocation", fields: [sourceLocationId], references: [id])
+  destLocation    Location @relation("DestLocation", fields: [destLocationId], references: [id])
+  item            Item     @relation(fields: [itemId], references: [id])
+  requestedBy     User     @relation("RequestedBy", fields: [requestedById], references: [id])
+  dispatchedBy    User?    @relation("DispatchedBy", fields: [dispatchedById], references: [id])
+  receivedBy      User?    @relation("ReceivedBy", fields: [receivedById], references: [id])
+
+  @@index([status])
+  @@index([sourceLocationId])
+  @@index([destLocationId])
+  @@map("stock_transfers")
+}
+
+// ─── Customer Order ───────────────────────────────────────────────────────────
+// Sales users create orders that reserve available inventory.
+// Reservation increments reservedQty on the target Inventory row.
+// Cancellation decrements reservedQty (releases the reservation).
+
+model CustomerOrder {
+  id            String      @id @default(cuid())
+  orderNumber   String      @unique
+  customerName  String
+  customerPhone String?
+  locationId    String
+  status        OrderStatus @default(PENDING)
+  totalQty      Int         @default(0)
+  notes         String?
+  createdById   String
+  confirmedAt   DateTime?
+  cancelledAt   DateTime?
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+
+  location  Location    @relation(fields: [locationId], references: [id])
+  createdBy User        @relation(fields: [createdById], references: [id])
+  items     OrderItem[]
+
+  @@index([status])
+  @@index([locationId])
+  @@map("customer_orders")
+}
+
+model OrderItem {
+  id          String   @id @default(cuid())
+  orderId     String
+  inventoryId String
+  quantity    Int
+
+  // Item snapshot for historical display
+  itemName    String
+  itemSku     String
+  unitPrice   Decimal  @db.Decimal(10, 2)
+  createdAt   DateTime @default(now())
+
+  order     CustomerOrder @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  inventory Inventory     @relation(fields: [inventoryId], references: [id])
+  item      Item          @relation(fields: [itemId], references: [id])
+  itemId    String
+
+  @@index([orderId])
+  @@index([inventoryId])
+  @@map("order_items")
+}
