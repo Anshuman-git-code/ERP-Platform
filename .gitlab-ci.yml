@@ -192,19 +192,38 @@ package:frontend:
 
 # ── DEPLOY ────────────────────────────────────────────────────────────────────
 # Manual gate — only runs on main after package succeeds.
-# Requires CI/CD variables: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY,
-#   ECR_REGISTRY, ECR_REPO_BACKEND, ECR_REPO_FRONTEND, ECS_CLUSTER,
-#   ECS_SERVICE_BACKEND, ECS_SERVICE_FRONTEND
+#
+# Uses a combined image with both aws-cli and crane (no Docker daemon required).
+# crane copies the image from GitLab Container Registry → ECR without needing
+# a Docker socket. aws-cli then triggers the ECS rolling deployment.
+#
+# Required CI/CD variables (Settings → CI/CD → Variables, masked + protected):
+#   AWS_ACCESS_KEY_ID       IAM ci_deploy user
+#   AWS_SECRET_ACCESS_KEY   IAM ci_deploy user
+#   ECR_REGISTRY:           690081480550.dkr.ecr.ap-south-1.amazonaws.com
+#   ECR_REPO_BACKEND:       ops-erp-backend-dev
+#   ECR_REPO_FRONTEND:      ops-erp-frontend-dev
+#   ECS_CLUSTER:            ops-erp-cluster-dev
+#   ECS_SERVICE_BACKEND:    ops-erp-backend-dev
+#   ECS_SERVICE_FRONTEND:   ops-erp-frontend-dev
 
 .deploy_common: &deploy_common
   stage: deploy
+  # Use amazon/aws-cli as the base; install crane for daemon-less image copy
   image:
     name: amazon/aws-cli:2.15.0
     entrypoint: ['']
   before_script:
-    - aws configure set region $AWS_REGION
-    - aws ecr get-login-password --region $AWS_REGION |
-        docker login --username AWS --password-stdin $ECR_REGISTRY
+    # Install crane (daemon-less image copy tool — no Docker socket needed)
+    - VERSION=$(curl -sf https://api.github.com/repos/google/go-containerregistry/releases/latest | grep '"tag_name"' | cut -d'"' -f4 | sed 's/v//')
+    - curl -sL "https://github.com/google/go-containerregistry/releases/download/v${VERSION}/go-containerregistry_Linux_x86_64.tar.gz" -o crane.tar.gz
+    - tar -xzf crane.tar.gz crane
+    - chmod +x crane && mv crane /usr/local/bin/crane
+    # Authenticate crane to GitLab Container Registry
+    - crane auth login $CI_REGISTRY -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD
+    # Authenticate crane to ECR
+    - ECR_PASSWORD=$(aws ecr get-login-password --region $AWS_REGION)
+    - crane auth login $ECR_REGISTRY -u AWS -p "$ECR_PASSWORD"
   rules:
     - if: $CI_COMMIT_BRANCH == "main"
       when: manual
@@ -213,31 +232,84 @@ package:frontend:
 deploy:backend:
   <<: *deploy_common
   script:
+    # Copy image from GitLab Registry → ECR (no Docker daemon needed)
     - |
-      docker pull $CI_REGISTRY_IMAGE/backend:$CI_COMMIT_SHORT_SHA
-      docker tag  $CI_REGISTRY_IMAGE/backend:$CI_COMMIT_SHORT_SHA \
-                  $ECR_REGISTRY/$ECR_REPO_BACKEND:$CI_COMMIT_SHORT_SHA
-      docker push $ECR_REGISTRY/$ECR_REPO_BACKEND:$CI_COMMIT_SHORT_SHA
+      crane copy \
+        $CI_REGISTRY_IMAGE/backend:$CI_COMMIT_SHORT_SHA \
+        $ECR_REGISTRY/$ECR_REPO_BACKEND:$CI_COMMIT_SHORT_SHA
+      crane tag \
+        $ECR_REGISTRY/$ECR_REPO_BACKEND:$CI_COMMIT_SHORT_SHA \
+        latest
+    # Update ECS service with the new image
+    - |
+      # Register a new task definition revision pointing at the new image
+      TASK_DEF=$(aws ecs describe-task-definition \
+        --task-definition ${ECS_SERVICE_BACKEND} \
+        --region $AWS_REGION \
+        --query 'taskDefinition' --output json)
+      NEW_TASK_DEF=$(echo $TASK_DEF | python3 -c "
+import sys, json
+td = json.load(sys.stdin)
+for c in td['containerDefinitions']:
+    if c['name'] == 'backend':
+        c['image'] = '${ECR_REGISTRY}/${ECR_REPO_BACKEND}:${CI_COMMIT_SHORT_SHA}'
+for key in ['taskDefinitionArn','revision','status','registeredAt','registeredBy',
+            'requiresAttributes','compatibilities']:
+    td.pop(key, None)
+print(json.dumps(td))
+")
+      NEW_ARN=$(aws ecs register-task-definition \
+        --region $AWS_REGION \
+        --cli-input-json "$NEW_TASK_DEF" \
+        --query 'taskDefinition.taskDefinitionArn' --output text)
       aws ecs update-service \
         --cluster $ECS_CLUSTER \
         --service $ECS_SERVICE_BACKEND \
-        --force-new-deployment
+        --task-definition "$NEW_ARN" \
+        --region $AWS_REGION
       aws ecs wait services-stable \
         --cluster $ECS_CLUSTER \
-        --services $ECS_SERVICE_BACKEND
+        --services $ECS_SERVICE_BACKEND \
+        --region $AWS_REGION
 
 deploy:frontend:
   <<: *deploy_common
   script:
+    # Copy image from GitLab Registry → ECR
     - |
-      docker pull $CI_REGISTRY_IMAGE/frontend:$CI_COMMIT_SHORT_SHA
-      docker tag  $CI_REGISTRY_IMAGE/frontend:$CI_COMMIT_SHORT_SHA \
-                  $ECR_REGISTRY/$ECR_REPO_FRONTEND:$CI_COMMIT_SHORT_SHA
-      docker push $ECR_REGISTRY/$ECR_REPO_FRONTEND:$CI_COMMIT_SHORT_SHA
+      crane copy \
+        $CI_REGISTRY_IMAGE/frontend:$CI_COMMIT_SHORT_SHA \
+        $ECR_REGISTRY/$ECR_REPO_FRONTEND:$CI_COMMIT_SHORT_SHA
+      crane tag \
+        $ECR_REGISTRY/$ECR_REPO_FRONTEND:$CI_COMMIT_SHORT_SHA \
+        latest
+    # Update ECS service
+    - |
+      TASK_DEF=$(aws ecs describe-task-definition \
+        --task-definition ${ECS_SERVICE_FRONTEND} \
+        --region $AWS_REGION \
+        --query 'taskDefinition' --output json)
+      NEW_TASK_DEF=$(echo $TASK_DEF | python3 -c "
+import sys, json
+td = json.load(sys.stdin)
+for c in td['containerDefinitions']:
+    if c['name'] == 'frontend':
+        c['image'] = '${ECR_REGISTRY}/${ECR_REPO_FRONTEND}:${CI_COMMIT_SHORT_SHA}'
+for key in ['taskDefinitionArn','revision','status','registeredAt','registeredBy',
+            'requiresAttributes','compatibilities']:
+    td.pop(key, None)
+print(json.dumps(td))
+")
+      NEW_ARN=$(aws ecs register-task-definition \
+        --region $AWS_REGION \
+        --cli-input-json "$NEW_TASK_DEF" \
+        --query 'taskDefinition.taskDefinitionArn' --output text)
       aws ecs update-service \
         --cluster $ECS_CLUSTER \
         --service $ECS_SERVICE_FRONTEND \
-        --force-new-deployment
+        --task-definition "$NEW_ARN" \
+        --region $AWS_REGION
       aws ecs wait services-stable \
         --cluster $ECS_CLUSTER \
-        --services $ECS_SERVICE_FRONTEND
+        --services $ECS_SERVICE_FRONTEND \
+        --region $AWS_REGION
