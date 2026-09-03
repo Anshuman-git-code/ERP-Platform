@@ -29,6 +29,14 @@ A production-oriented Operations ERP covering the flow:
 
 ---
 
+## Architecture
+
+![Architecture](assets/Mini%20Operations%20ERP%20Architecture%20and%20Transactions.png)
+
+## GitLab CI/CD Pipeline
+
+![CI/CD Pipeline Success](assets/CI-CD-Pipeline-Success.png)
+
 ## Application Screenshots
 
 ### Login
@@ -60,9 +68,6 @@ A production-oriented Operations ERP covering the flow:
 
 ---
 
-## Architecture
-
-![Architecture](assets/Mini%20Operations%20ERP%20Architecture%20and%20Transactions.png)
 
 The diagram covers:
 - **Local Development Stack** — Vite dev server → Express → PostgreSQL
@@ -251,12 +256,9 @@ GitLab CI pipeline (`.gitlab-ci.yml`) — 5 stages:
 ```
 validate  → lint + typecheck (backend + frontend)
 test      → 74 integration tests against PostgreSQL service container
-build     → tsc compile + vite build
-package   → Docker images → GitLab Container Registry (main/develop)
-deploy    → Retag → ECR → ECS update-service (main only, MANUAL gate)
-```
-
 ### Pipeline Success
+
+![CI/CD Pipeline Success](assets/CI-CD-Pipeline-Success.png)
 
 <!-- CI_CD_SCREENSHOT_PLACEHOLDER -->
 > **Note:** Add screenshot of successful GitLab CI/CD pipeline here.
