@@ -1,5 +1,58 @@
 # End-to-End Verification Evidence
 
+## Deployment Status: LIVE ✅
+
+**Deployed:** September 2026
+**Commit:** 989f045
+**Live URL:** http://ops-erp-alb-dev-330409874.ap-south-1.elb.amazonaws.com
+**Health URL:** http://ops-erp-alb-dev-330409874.ap-south-1.elb.amazonaws.com/health
+
+### Production Health Check (verified live)
+```json
+{
+  "status": "ok",
+  "environment": "production",
+  "database": { "status": "ok", "latencyMs": 1 },
+  "uptime": 1982
+}
+```
+
+---
+
+## Browser Verification Screenshots
+
+All five required screens verified live in production:
+
+| Screen | Screenshot |
+|---|---|
+| Login | [assets/login-page.png](../assets/login-page.png) |
+| Inventory | [assets/inventory-page.png](../assets/inventory-page.png) |
+| Work Orders | [assets/Work Orders.png](../assets/Work%20Orders.png) |
+| Internal Transfers | [assets/Internal Transfers Page.png](../assets/Internal%20Transfers%20Page.png) |
+| Customer Orders | [assets/Customer Orders Page.png](../assets/Customer%20Orders%20Page.png) |
+
+### Modal / Form Verification
+
+| Action | Screenshot |
+|---|---|
+| Add Inventory Record modal | [assets/Add-Inventory-Record.png](../assets/Add-Inventory-Record.png) |
+| Create Work Order modal | [assets/Create New Work Order.png](../assets/Create%20New%20Work%20Order.png) |
+| Request Stock Transfer modal | [assets/Request Stock Transfer.png](../assets/Request%20Stock%20Transfer.png) |
+| Create Customer Order modal | [assets/Create New Customer Order.png](../assets/Create%20New%20Customer%20Order.png) |
+
+---
+
+## CI/CD Pipeline Verification
+
+<!-- CI_CD_SCREENSHOT_PLACEHOLDER -->
+> **Pending:** Add screenshot of successful GitLab CI/CD pipeline.
+> Save as `assets/CI-CD-Pipeline-Success.png` and replace this block with:
+> `![CI/CD Pipeline Success](../assets/CI-CD-Pipeline-Success.png)`
+
+Pipeline configuration: `.gitlab-ci.yml` — 5 stages: validate → test → build → package → deploy (manual gate on main).
+
+---
+
 ## Test Suite Results
 
 ```

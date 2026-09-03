@@ -1,5 +1,34 @@
 # Deployment Guide — Mini Operations ERP
 
+## Live Deployment (AWS — Deployed September 2026)
+
+| Resource | Value |
+|---|---|
+| **Live URL** | http://ops-erp-alb-dev-330409874.ap-south-1.elb.amazonaws.com |
+| **Health URL** | http://ops-erp-alb-dev-330409874.ap-south-1.elb.amazonaws.com/health |
+| **Region** | ap-south-1 (Mumbai) |
+| **ECS Cluster** | ops-erp-cluster-dev |
+| **Backend Service** | ops-erp-backend-dev (ACTIVE, running=1) |
+| **Frontend Service** | ops-erp-frontend-dev (ACTIVE, running=1) |
+| **RDS** | ops-erp-db-dev (PostgreSQL 15, db.t3.micro, private subnet) |
+| **ECR Backend** | 690081480550.dkr.ecr.ap-south-1.amazonaws.com/ops-erp-backend-dev:989f045 |
+| **ECR Frontend** | 690081480550.dkr.ecr.ap-south-1.amazonaws.com/ops-erp-frontend-dev:989f045 |
+| **Deployed commit** | 989f045 |
+
+### GitLab CI/CD Variable Values (set in Settings → CI/CD → Variables)
+
+| Variable | Value |
+|---|---|
+| `ECR_REGISTRY` | `690081480550.dkr.ecr.ap-south-1.amazonaws.com` |
+| `ECR_REPO_BACKEND` | `ops-erp-backend-dev` |
+| `ECR_REPO_FRONTEND` | `ops-erp-frontend-dev` |
+| `ECS_CLUSTER` | `ops-erp-cluster-dev` |
+| `ECS_SERVICE_BACKEND` | `ops-erp-backend-dev` |
+| `ECS_SERVICE_FRONTEND` | `ops-erp-frontend-dev` |
+| `AWS_ACCESS_KEY_ID` | (masked) IAM ci_deploy user |
+| `AWS_SECRET_ACCESS_KEY` | (masked) IAM ci_deploy user |
+
+---
 ## Local (Docker Compose)
 
 ```bash
