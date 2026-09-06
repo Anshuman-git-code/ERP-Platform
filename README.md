@@ -1,6 +1,6 @@
 # Mini Operations ERP
 
-**Fundsroom Infotech — Full-Stack Developer Technical Case Study 2**
+**This is a Mini Operations ERP that manages the operational flow from inventory to work orders, internal stock transfers, and customer reservations.**
 
 A production-oriented Operations ERP covering the flow:
 
