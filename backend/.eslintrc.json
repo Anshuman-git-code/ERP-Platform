@@ -1,23 +1,107 @@
 {
+  // ============================================================
+  // FILE: backend/.eslintrc.json
+  // CONSTRUCTION ORDER: #5
+  // HOW: Created manually. ESLint does not have a mandatory init command
+  //      (though `npx eslint --init` generates one). This was written by hand.
+  // WHY NOW: Created right after tsconfig.json because:
+  //   1. ESLint needs tsconfig.json to exist (parserOptions.project points to it)
+  //   2. Linting rules should be set BEFORE writing any source code, not after,
+  //      so every file from this point forward is written to the same standard
+  //   3. CI runs `npm run lint` as the first validation step — it must be configured
+  // ============================================================
+  // "root": true — stops ESLint from looking for config files in parent directories.
+  // Without this, ESLint might accidentally pick up a .eslintrc from a parent folder
+  // (e.g., a monorepo root config) and apply conflicting rules.
   "root": true,
+  // "parser" — tells ESLint which parser to use to understand the source code.
+  // ESLint's default parser only understands JavaScript.
+  // @typescript-eslint/parser understands TypeScript syntax (.ts, .tsx files).
   "parser": "@typescript-eslint/parser",
+  // "parserOptions" — configuration for the TypeScript parser.
   "parserOptions": {
+    // "ecmaVersion": 2020 — the parser accepts ES2020 syntax
+    // (optional chaining, nullish coalescing, etc.)
     "ecmaVersion": 2020,
+    // "sourceType": "module" — source files use ES module syntax
+    // (import/export), not CommonJS (require/module.exports).
+    // Even though our OUTPUT is CommonJS (tsconfig "module": "commonjs"),
+    // the SOURCE files use import/export syntax which TypeScript transpiles.
     "sourceType": "module",
+    // "project": "./tsconfig.json" — links ESLint to the TypeScript project.
+    // This is required for type-aware lint rules (rules that need to know
+    // the TypeScript type of a variable to make a decision).
+    // Example: @typescript-eslint/no-floating-promises needs to know if
+    // a function returns a Promise to warn about unawaited calls.
     "project": "./tsconfig.json"
   },
-  "plugins": ["@typescript-eslint"],
-  "extends": ["eslint:recommended", "plugin:@typescript-eslint/recommended"],
+  // "plugins" — registers the TypeScript ESLint plugin.
+  // This makes @typescript-eslint/* rules available.
+  "plugins": [
+    "@typescript-eslint"
+  ],
+  // "extends" — activates pre-built rule sets.
+  // These are applied IN ORDER, and later sets override earlier ones.
+  "extends": [
+    // "eslint:recommended" — turns on ~50 well-agreed rules:
+    // no-unused-vars, no-undef, no-console (we override this below), etc.
+    "eslint:recommended",
+    // "plugin:@typescript-eslint/recommended" — turns on TypeScript-specific
+    // recommended rules: no-explicit-any, no-unused-vars (TS version), etc.
+    // This overrides some eslint:recommended rules with TS-aware equivalents.
+    "plugin:@typescript-eslint/recommended"
+  ],
+  // "rules" — individual rule overrides and customizations.
   "rules": {
+    // @typescript-eslint/no-explicit-any: "warn" — using `any` type is a warning,
+    // not an error. In an ideal world it would be "error", but there are legitimate
+    // cases where `any` is unavoidable (e.g., the catch(err) block before narrowing,
+    // or third-party library return types). "warn" keeps the codebase honest without
+    // being so strict that it's impossible to compile.
     "@typescript-eslint/no-explicit-any": "warn",
-    "@typescript-eslint/no-unused-vars": ["error", { "argsIgnorePattern": "^_" }],
+    // @typescript-eslint/no-unused-vars with argsIgnorePattern — unused variables
+    // are errors (you should clean up your code), BUT parameters starting with
+    // underscore (_) are ignored. This is the convention used throughout the
+    // codebase: _res, _req, _next for Express params you must declare but don't use.
+    "@typescript-eslint/no-unused-vars": [
+      "error",
+      {
+        "argsIgnorePattern": "^_"
+      }
+    ],
+    // explicit-function-return-type: "off" — we do NOT require every function
+    // to have an explicit return type annotation. TypeScript's type inference
+    // handles most cases perfectly, and requiring explicit returns would make
+    // the code much more verbose for no safety benefit.
     "@typescript-eslint/explicit-function-return-type": "off",
+    // explicit-module-boundary-types: "off" — same reasoning. Exported functions
+    // don't need explicit return types on their signatures.
     "@typescript-eslint/explicit-module-boundary-types": "off",
+    // "no-console": "off" — allows console.log/error/warn.
+    // The seed script uses console.log extensively for progress output.
+    // Application code uses the winston logger instead, but we don't enforce that via lint.
     "no-console": "off"
   },
+  // "env" — tells ESLint which global variables exist in this environment.
   "env": {
+    // "node": true — adds process, global, __dirname, require, etc. as known globals
     "node": true,
+    // "es2020": true — adds Promise.allSettled, BigInt, etc. as known globals
     "es2020": true
   },
-  "ignorePatterns": ["dist/", "node_modules/", "*.js", "prisma/seed.ts", "src/__tests__/**"]
+  // "ignorePatterns" — files and folders ESLint should completely skip.
+  "ignorePatterns": [
+    // dist/ — compiled output (JavaScript, not TypeScript — parser would choke)
+    "dist/",
+    // node_modules/ — not our code
+    "node_modules/",
+    // *.js — any plain JavaScript files (ESLint is configured for TypeScript here)
+    "*.js",
+    // prisma/seed.ts — uses console.log and has patterns that trigger rules;
+    // it's a dev-only script, not production code, so excluding saves noise
+    "prisma/seed.ts",
+    // src/__tests__/** — test files have different patterns (jest globals, etc.)
+    // and are covered by @types/jest which adds describe/it/expect globals
+    "src/__tests__/**"
+  ]
 }

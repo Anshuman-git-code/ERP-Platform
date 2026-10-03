@@ -1,71 +1,160 @@
+# ============================================================
+# FILE: docker-compose.yml
+# CONSTRUCTION ORDER: #35
+# HOW: touch docker-compose.yml (at the project root, not in backend/)
+# WHY NOW: Written after the Dockerfile is complete and tested.
+#          docker-compose.yml wires multiple containers together.
+#          You need a working Dockerfile before you can compose services.
+# WHAT THIS FILE DOES:
+#   Defines THREE services that run together in Docker:
+#   1. postgres  — the PostgreSQL database
+#   2. backend   — the Express/Node.js API (uses backend/Dockerfile)
+#   3. frontend  — the React app (uses frontend/Dockerfile)
+#   Plus a named volume for persisting the database across container restarts.
+# HOW TO USE:
+#   docker compose up --build   — build images and start all services
+#   docker compose down         — stop all services
+#   docker compose logs backend — view backend logs
+# PORT CONVENTIONS:
+#   This project is designed to coexist with other case studies:
+#   CS1 uses ports 5432 (postgres), 4000 (backend), 3000 (frontend)
+#   CS2 uses offset ports: 5444 (postgres), 4002 (backend), 3002 (frontend)
+# ============================================================
+
 services:
-  # ── PostgreSQL ──────────────────────────────────────────────────────────────
+
+  # ── PostgreSQL database ─────────────────────────────────────────────────────
   postgres:
+    # image: use the official postgres:15-alpine image from Docker Hub.
+    # We don't build this from a Dockerfile — it's pulled pre-built.
+    # postgres:15 matches the engine version in schema.prisma and database.tf.
+    # Alpine variant keeps it lightweight.
     image: postgres:15-alpine
     container_name: ops_erp_postgres
+
+    # environment: sets PostgreSQL's initialization variables.
+    # These are used ONLY on first startup when the data directory is empty.
     environment:
-      POSTGRES_DB: ops_erp
-      POSTGRES_USER: ops_user
-      POSTGRES_PASSWORD: devpassword123
+      POSTGRES_DB: ops_erp            # Name of the database to create
+      POSTGRES_USER: ops_user         # PostgreSQL superuser username
+      POSTGRES_PASSWORD: devpassword123  # Password (for development only — never production)
+
+    # volumes: mounts the named volume `postgres_data` at the PostgreSQL data directory.
+    # WHY: Without this, all database data is lost when the container stops.
+    # The `postgres_data` volume is defined at the bottom of this file.
+    # Named volumes persist across `docker compose down` but are removed by `docker compose down -v`.
     volumes:
       - postgres_data:/var/lib/postgresql/data
+
+    # ports: host_port:container_port mapping.
+    # 5444 on the host → 5432 inside the container.
+    # WHY 5444: If another PostgreSQL is running on the host (e.g., from CS1), 5432 is taken.
+    # This allows both to run simultaneously.
     ports:
-      - '5444:5432'   # host 5444 — avoids conflicts with CS1 (5432) and erp_verify (5433)
+      - '5444:5432'
+
+    # healthcheck: Docker periodically runs this command.
+    # If it fails repeatedly, the container is marked "unhealthy".
+    # backend's `depends_on` uses condition: service_healthy to wait for this.
+    # pg_isready -U ops_user -d ops_erp: checks if PostgreSQL is accepting connections.
     healthcheck:
       test: ['CMD-SHELL', 'pg_isready -U ops_user -d ops_erp']
-      interval: 5s
-      timeout: 5s
-      retries: 10
-    restart: unless-stopped
+      interval: 5s    # Check every 5 seconds
+      timeout: 5s     # Each check must complete within 5 seconds
+      retries: 10     # After 10 consecutive failures, mark as unhealthy
+    restart: unless-stopped  # Restart the container if it crashes (unless manually stopped)
 
-  # ── Backend ─────────────────────────────────────────────────────────────────
+  # ── Backend API ──────────────────────────────────────────────────────────────
   backend:
+    # build: instead of using a pre-built image, Docker builds this from our Dockerfile.
     build:
-      context: ./backend
-      dockerfile: Dockerfile
+      context: ./backend    # The build context — files available to the Dockerfile
+      dockerfile: Dockerfile  # Which Dockerfile to use (default, but explicit is clear)
+
     container_name: ops_erp_backend
+
+    # depends_on: this service won't start until `postgres` is healthy.
+    # condition: service_healthy means Docker waits for the healthcheck above to pass.
+    # Without this, the backend might start before PostgreSQL is ready, fail to connect,
+    # and crash — even if PostgreSQL starts fine a few seconds later.
     depends_on:
       postgres:
         condition: service_healthy
+
+    # environment: injects environment variables into the container at startup.
+    # These override any values that might be set elsewhere.
+    # The Dockerfile's CMD runs `prisma migrate deploy` which uses DATABASE_URL.
     environment:
-      NODE_ENV: production
-      PORT: 4000
+      NODE_ENV: production      # Enables production logging format (JSON)
+      PORT: 4000                # The port Express listens on inside the container
+      # Database connection — uses 'postgres' as the hostname.
+      # In Docker Compose, service names are DNS hostnames within the Docker network.
+      # So 'postgres' resolves to the postgres container's IP address automatically.
       DATABASE_URL: postgresql://ops_user:devpassword123@postgres:5432/ops_erp?schema=public
+      # JWT_SECRET — this is a dev-only value. Never use this in production.
+      # In production (ECS), this comes from AWS SSM Parameter Store.
       JWT_SECRET: compose_dev_secret_change_before_production_use_64chars
       JWT_EXPIRES_IN: 8h
-      CORS_ORIGIN: http://localhost:3002
+      CORS_ORIGIN: http://localhost:3002  # Frontend is on port 3002
       LOG_LEVEL: info
+
+    # ports: 4002 on host → 4000 inside the container.
     ports:
-      - '4002:4000'   # host 4002 — avoids CS1 (4000)
+      - '4002:4000'
+
+    # healthcheck: checks the /health endpoint (which checks database connectivity).
+    # wget -qO-: wget in quiet mode, output to stdout (like curl).
+    # || exit 1: if wget fails, exit with error code 1 (marking as unhealthy).
+    # start_period: 45s — gives the container 45 seconds to start up before
+    # health checks are counted against it (time for prisma migrate deploy to run).
     healthcheck:
       test: ['CMD-SHELL', 'wget -qO- http://localhost:4000/health || exit 1']
       interval: 15s
       timeout: 10s
       retries: 5
       start_period: 45s
+
     restart: unless-stopped
 
-  # ── Frontend ─────────────────────────────────────────────────────────────────
+  # ── Frontend ──────────────────────────────────────────────────────────────────
   frontend:
     build:
       context: ./frontend
       dockerfile: Dockerfile
+      # args: build-time arguments passed to the frontend Dockerfile.
+      # VITE_API_BASE_URL=/api tells the React app to use relative URLs for API calls.
+      # The nginx reverse proxy (inside the frontend container) routes /api to the backend.
       args:
         VITE_API_BASE_URL: /api
+
     container_name: ops_erp_frontend
+
+    # Frontend depends on backend being healthy — no point loading the UI if the API is down.
     depends_on:
       backend:
         condition: service_healthy
+
     environment:
+      # BACKEND_URL: the URL the nginx proxy uses to forward API requests.
+      # 'backend' resolves to the backend container via Docker's internal DNS.
       BACKEND_URL: http://backend:4000
+
     ports:
-      - '3002:80'     # host 3002 — avoids CS1 (3000)
+      - '3002:80'  # 3002 on host → nginx port 80 inside the container
+
     healthcheck:
       test: ['CMD-SHELL', 'curl -sf http://127.0.0.1:80/ > /dev/null || exit 1']
       interval: 15s
       timeout: 5s
       retries: 3
+
     restart: unless-stopped
 
+# ── Named volumes ─────────────────────────────────────────────────────────────
+# Volumes declared here are managed by Docker (not tied to a host path).
+# docker compose down      — keeps this volume (data persists)
+# docker compose down -v   — removes this volume (data deleted)
 volumes:
   postgres_data:
+    # No driver specified — uses Docker's default local driver.
+    # The volume is stored in Docker's internal volume storage (~/.docker/volumes/).

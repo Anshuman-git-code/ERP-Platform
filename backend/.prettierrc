@@ -1,8 +1,55 @@
 {
+  // ============================================================
+  // FILE: backend/.prettierrc
+  // CONSTRUCTION ORDER: #6
+  // HOW: Created manually. Prettier has no required init command.
+  //      This is a minimal JSON config file written by hand.
+  // WHY NOW: Created alongside .eslintrc.json before writing any code,
+  //          so every file written from this point uses the same formatting.
+  //          Prettier handles the "how does code look" question (spacing,
+  //          quotes, commas) while ESLint handles the "is this code correct"
+  //          question. They complement each other.
+  // HOW IT WORKS: When a developer runs Prettier (via an editor plugin
+  //          or `npx prettier --write src/`) it reformats all code to
+  //          exactly match these rules. This eliminates formatting debates
+  //          in code reviews.
+  // ============================================================
+
+  // "semi": true — add semicolons at the end of statements.
+  // JavaScript can sometimes work without them (ASI — Automatic Semicolon
+  // Insertion), but semicolons make code unambiguous and are the standard
+  // in most Node.js projects.
   "semi": true,
+
+  // "trailingComma": "es5" — add trailing commas wherever ES5 allows them.
+  // That means: array literals, object literals, function parameters in
+  // declarations (but NOT in function calls in some older contexts).
+  // Trailing commas make git diffs cleaner — adding a new item to an array
+  // only shows ONE changed line instead of two (the new item + the comma
+  // added to the previous last item).
   "trailingComma": "es5",
+
+  // "singleQuote": true — use single quotes ' instead of double quotes ".
+  // This is the Node.js/JavaScript convention (React uses double quotes by
+  // default for JSX attributes, but backend code typically uses single quotes).
+  // All imports in this project look like: import express from 'express';
   "singleQuote": true,
+
+  // "printWidth": 100 — try to fit code within 100 characters per line.
+  // The default is 80, but with TypeScript's verbose type annotations,
+  // 80 characters is often too narrow. 100 is a practical compromise.
+  // Prettier will break lines that exceed this, but won't force short lines
+  // to be joined.
   "printWidth": 100,
+
+  // "tabWidth": 2 — use 2 spaces for indentation.
+  // This is the standard for JavaScript/TypeScript projects (Python typically
+  // uses 4 spaces; JS/TS convention is 2).
   "tabWidth": 2,
+
+  // "endOfLine": "lf" — use Unix line endings (LF = \n) not Windows line
+  // endings (CRLF = \r\n). This prevents the entire file from showing as
+  // "changed" in git when switching between macOS/Linux and Windows.
+  // Since the Docker container runs Linux, LF is the correct target.
   "endOfLine": "lf"
 }

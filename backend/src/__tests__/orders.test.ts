@@ -1,20 +1,21 @@
 /**
- * Customer Order / Reservation tests.
- *
- * Mandatory Test 1 — Cannot reserve more than available inventory.
- *
- * This includes the critical concurrency scenario:
- *   Two requests compete to reserve stock from the same inventory row.
- *   The combined quantity of both requests exceeds what is available.
- *   Exactly one must succeed; the other must fail with 422.
- *   The final reservedQty must never exceed the original physicalQty.
- *
- * Additional coverage:
- *   - Basic confirm happy path
- *   - Reservation increments reservedQty (availableQty decreases)
- *   - Cancel CONFIRMED order releases reservedQty
- *   - Cannot confirm an already-confirmed order
- *   - Cannot confirm when availableQty = 0
+ * ============================================================
+ * FILE: backend/src/__tests__/orders.test.ts
+ * CONSTRUCTION ORDER: #33 — Last test file
+ * HOW: touch src/__tests__/orders.test.ts
+ * MANDATORY TEST COVERED:
+ *   Test 1 — Cannot reserve more than available inventory.
+ *   This includes the critical CONCURRENCY SCENARIO:
+ *     Two requests fire simultaneously to reserve stock.
+ *     Combined quantity exceeds available.
+ *     Exactly ONE must succeed; the other must get 422.
+ *     Final reservedQty must equal exactly what the winner reserved.
+ * WHY LAST: The most complex test — requires understanding of:
+ *   - The PENDING → CONFIRMED order lifecycle
+ *   - How reservedQty relates to physicalQty and availableQty
+ *   - Promise.all for concurrent HTTP requests
+ *   - How SELECT FOR UPDATE prevents over-reservation
+ * ============================================================
  */
 import './setup';
 import request from 'supertest';
@@ -31,7 +32,7 @@ let adminUserId: string;
 
 let locationId: string;
 let itemId: string;
-let inventoryId: string; // 20 units physicalQty, 0 reservedQty initially
+let inventoryId: string;  // Single inventory row — 20 units initially
 
 const tag = Date.now().toString();
 
@@ -62,7 +63,7 @@ beforeAll(async () => {
   });
   itemId = item.id;
 
-  // 20 units available, 0 reserved
+  // Initial inventory: 20 units, none reserved.
   const inv = await prisma.inventory.create({
     data: { itemId, locationId, batchNumber: 'DEFAULT', physicalQty: 20, reservedQty: 0 },
   });
@@ -70,6 +71,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  // Clean up child records before parent records.
   await prisma.orderItem.deleteMany({ where: { inventory: { id: inventoryId } } });
   await prisma.customerOrder.deleteMany({ where: { locationId } });
   await prisma.inventoryTransaction.deleteMany({ where: { inventoryId } });
@@ -80,14 +82,15 @@ afterAll(async () => {
   await prisma.$disconnect();
 });
 
-// helper to reset inventory state between sub-tests
+// Helper: resets the inventory row to a known state between test groups.
+// Using Prisma directly — faster than going through the API.
 async function resetInventory(physicalQty: number, reservedQty = 0) {
   await prisma.inventory.update({ where: { id: inventoryId }, data: { physicalQty, reservedQty } });
 }
 
-// helper: create a PENDING order
+// Helper: creates a PENDING order via the API and returns the full response.
 async function createOrder(qty: number, token: string) {
-  const res = await request(app)
+  return request(app)
     .post('/api/orders')
     .set('Authorization', `Bearer ${token}`)
     .send({
@@ -95,11 +98,9 @@ async function createOrder(qty: number, token: string) {
       locationId,
       items: [{ inventoryId, quantity: qty }],
     });
-  return res;
 }
 
-// ── Basic happy path ───────────────────────────────────────────────────────────
-
+// ── Happy path ────────────────────────────────────────────────────────────────
 describe('Order creation and confirmation — happy path', () => {
   let orderId: string;
 
@@ -119,10 +120,10 @@ describe('Order creation and confirmation — happy path', () => {
     const res = await request(app)
       .patch(`/api/orders/${orderId}/confirm`)
       .set('Authorization', `Bearer ${salesToken}`);
-
     expect(res.status).toBe(200);
     expect(res.body.data.status).toBe('CONFIRMED');
 
+    // Verify the inventory row was updated by Prisma directly.
     const inv = await prisma.inventory.findUnique({ where: { id: inventoryId } });
     expect(inv!.reservedQty).toBe(8);
     // availableQty = physicalQty - reservedQty = 20 - 8 = 12
@@ -133,38 +134,41 @@ describe('Order creation and confirmation — happy path', () => {
     const res = await request(app)
       .patch(`/api/orders/${orderId}/confirm`)
       .set('Authorization', `Bearer ${salesToken}`);
+    // Order is already CONFIRMED — status check in /confirm fails with 400.
     expect(res.status).toBe(400);
   });
 });
 
-// ── Mandatory Test 1: Cannot reserve more than available ──────────────────────
-
+// ── MANDATORY TEST 1: Over-reservation prevention ─────────────────────────────
 describe('Mandatory Test 1 — cannot reserve more than available inventory', () => {
   beforeAll(async () => {
-    await resetInventory(10, 0);
+    await resetInventory(10, 0);  // 10 available
   });
 
   it('returns 422 when requested quantity exceeds available (10 available, request 15)', async () => {
-    const createRes = await createOrder(15, salesToken); // 15 > 10
-    expect(createRes.status).toBe(201);
+    const createRes = await createOrder(15, salesToken);  // 15 > 10
+    expect(createRes.status).toBe(201);  // Creation succeeds
     const orderId = createRes.body.data.id as string;
 
     const confirmRes = await request(app)
       .patch(`/api/orders/${orderId}/confirm`)
       .set('Authorization', `Bearer ${salesToken}`);
 
+    // MANDATORY TEST 1: Confirmation fails because 15 > 10 available.
     expect(confirmRes.status).toBe(422);
     expect(confirmRes.body.success).toBe(false);
     expect(confirmRes.body.message).toMatch(/insufficient/i);
+    // The response includes structured details about what failed.
     expect(confirmRes.body.details.insufficientItems).toBeDefined();
     expect(confirmRes.body.details.insufficientItems[0].available).toBe(10);
     expect(confirmRes.body.details.insufficientItems[0].requested).toBe(15);
   });
 
   it('inventory reservedQty unchanged after failed reservation attempt', async () => {
+    // The transaction rolled back — reservedQty must still be 0.
     const inv = await prisma.inventory.findUnique({ where: { id: inventoryId } });
-    expect(inv!.reservedQty).toBe(0); // no change
-    expect(inv!.physicalQty).toBe(10);
+    expect(inv!.reservedQty).toBe(0);
+    expect(inv!.physicalQty).toBe(10);  // physicalQty unaffected
   });
 
   it('reservedQty can never exceed physicalQty', async () => {
@@ -173,13 +177,25 @@ describe('Mandatory Test 1 — cannot reserve more than available inventory', ()
   });
 });
 
-// ── Mandatory Test 1 (concurrency): two requests cannot collectively over-reserve ──
-
+// ── MANDATORY TEST 1 (concurrency) ────────────────────────────────────────────
 describe('Mandatory Test 1 (concurrency) — two concurrent reservations cannot exceed available stock', () => {
   /**
-   * Scenario: 10 units available. Two requests each try to reserve 8.
-   * Combined = 16 > 10. Exactly one must succeed; the other must fail.
-   * Final reservedQty must equal exactly 8 (the one that succeeded).
+   * SCENARIO: 10 units available. Two requests each want 8 units.
+   * Combined = 16 > 10. Only ONE can succeed.
+   *
+   * HOW THIS WORKS WITHOUT THE FIX (naive implementation):
+   *   Request A reads physicalQty=10, reservedQty=0 → available=10 → 10>=8 → PASS
+   *   Request B reads physicalQty=10, reservedQty=0 → available=10 → 10>=8 → PASS
+   *   Request A updates reservedQty to 8
+   *   Request B updates reservedQty to 8 (overwrites A's update or adds to it → 16!)
+   *   Result: reservedQty=16 > physicalQty=10 → CATASTROPHIC
+   *
+   * HOW THIS WORKS WITH THE FIX (SELECT FOR UPDATE):
+   *   Request A starts transaction, SELECT FOR UPDATE on inventory row → LOCKED
+   *   Request B starts transaction, SELECT FOR UPDATE → BLOCKED (waiting for A)
+   *   Request A: available=10 >= 8 → reserves 8, commits → reservedQty=8
+   *   Request B: lock released, reads reservedQty=8, available=10-8=2 < 8 → 422
+   *   Result: reservedQty=8 ≤ physicalQty=10 → CORRECT
    */
 
   beforeAll(async () => {
@@ -187,7 +203,7 @@ describe('Mandatory Test 1 (concurrency) — two concurrent reservations cannot 
   });
 
   it('only one of two simultaneous reservations succeeds when combined qty > available', async () => {
-    // Create two PENDING orders (creation does not reserve — that happens on confirm)
+    // Create two PENDING orders (creation doesn't reserve — safe to do in parallel).
     const [createRes1, createRes2] = await Promise.all([
       createOrder(8, salesToken),
       createOrder(8, salesToken),
@@ -198,7 +214,11 @@ describe('Mandatory Test 1 (concurrency) — two concurrent reservations cannot 
     const orderId1 = createRes1.body.data.id as string;
     const orderId2 = createRes2.body.data.id as string;
 
-    // Fire both confirms simultaneously
+    // THE CRITICAL ASSERTION: fire both confirm requests SIMULTANEOUSLY.
+    // Promise.all fires both before either resolves.
+    // Both requests hit the Express server at nearly the same time.
+    // Both enter prisma.$transaction() and both try to SELECT FOR UPDATE.
+    // PostgreSQL serializes them via the row lock — one wins, one waits and then fails.
     const [confirmRes1, confirmRes2] = await Promise.all([
       request(app).patch(`/api/orders/${orderId1}/confirm`).set('Authorization', `Bearer ${salesToken}`),
       request(app).patch(`/api/orders/${orderId2}/confirm`).set('Authorization', `Bearer ${salesToken}`),
@@ -208,24 +228,22 @@ describe('Mandatory Test 1 (concurrency) — two concurrent reservations cannot 
     const successCount = statuses.filter(s => s === 200).length;
     const failCount = statuses.filter(s => s === 422).length;
 
-    // Exactly one succeeds, exactly one fails
+    // Exactly one must succeed (200), exactly one must fail (422).
     expect(successCount).toBe(1);
     expect(failCount).toBe(1);
   });
 
   it('final reservedQty equals exactly 8 — not 16 (no over-reservation)', async () => {
     const inv = await prisma.inventory.findUnique({ where: { id: inventoryId } });
-    // Only one reservation of 8 succeeded — reservedQty must be exactly 8
+    // Only one reservation of 8 went through.
     expect(inv!.reservedQty).toBe(8);
-    // physicalQty untouched (reservation only affects reservedQty)
-    expect(inv!.physicalQty).toBe(10);
-    // availableQty = 10 - 8 = 2
+    expect(inv!.physicalQty).toBe(10);  // physicalQty unchanged (reservation only affects reservedQty)
+    // Available = 10 - 8 = 2
     expect(inv!.physicalQty - inv!.reservedQty).toBe(2);
   });
 });
 
-// ── Order cancellation releases reservation ────────────────────────────────────
-
+// ── Cancellation releases reservation ─────────────────────────────────────────
 describe('Order cancellation releases reserved stock', () => {
   let orderId: string;
 
@@ -233,7 +251,7 @@ describe('Order cancellation releases reserved stock', () => {
     await resetInventory(20, 0);
     const createRes = await createOrder(10, salesToken);
     orderId = createRes.body.data.id as string;
-    // Confirm first
+    // Confirm so reservedQty = 10.
     await request(app)
       .patch(`/api/orders/${orderId}/confirm`)
       .set('Authorization', `Bearer ${salesToken}`);
@@ -248,15 +266,14 @@ describe('Order cancellation releases reserved stock', () => {
     const res = await request(app)
       .patch(`/api/orders/${orderId}/cancel`)
       .set('Authorization', `Bearer ${salesToken}`);
-
     expect(res.status).toBe(200);
     expect(res.body.data.status).toBe('CANCELLED');
   });
 
   it('after cancel: reservedQty returns to 0', async () => {
     const inv = await prisma.inventory.findUnique({ where: { id: inventoryId } });
-    expect(inv!.reservedQty).toBe(0);
-    expect(inv!.physicalQty).toBe(20);
+    expect(inv!.reservedQty).toBe(0);    // Reservation released
+    expect(inv!.physicalQty).toBe(20);   // Physical unchanged
   });
 
   it('cannot cancel an already-cancelled order (400)', async () => {
@@ -267,11 +284,10 @@ describe('Order cancellation releases reserved stock', () => {
   });
 });
 
-// ── Cannot reserve when availableQty is zero ──────────────────────────────────
-
+// ── Cannot confirm when availableQty = 0 ──────────────────────────────────────
 describe('Cannot confirm order when availableQty = 0', () => {
   beforeAll(async () => {
-    // physicalQty = 5, reservedQty = 5 → availableQty = 0
+    // physicalQty=5, reservedQty=5 → availableQty=0
     await resetInventory(5, 5);
   });
 
@@ -283,7 +299,6 @@ describe('Cannot confirm order when availableQty = 0', () => {
     const res = await request(app)
       .patch(`/api/orders/${orderId}/confirm`)
       .set('Authorization', `Bearer ${salesToken}`);
-
     expect(res.status).toBe(422);
     expect(res.body.details.insufficientItems[0].available).toBe(0);
   });

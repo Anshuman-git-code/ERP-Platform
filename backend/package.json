@@ -1,56 +1,187 @@
 {
+  // ============================================================
+  // FILE: backend/package.json
+  // CONSTRUCTION ORDER: #2
+  // HOW: Created by running `npm init -y` inside the backend/ folder,
+  //      which generates a minimal package.json. Then the developer
+  //      manually edited it to add the full scripts block and ran:
+  //        npm install express @prisma/client prisma bcryptjs cors dotenv
+  //                    express-async-errors express-validator jsonwebtoken morgan winston
+  //        npm install --save-dev typescript ts-node ts-node-dev jest ts-jest supertest
+  //                    @types/express @types/node @types/bcryptjs @types/cors
+  //                    @types/jsonwebtoken @types/morgan @types/jest @types/supertest
+  //                    @typescript-eslint/eslint-plugin @typescript-eslint/parser eslint
+  // WHY NOW: package.json must exist before any other file because:
+  //   1. npm install reads it to know what to download into node_modules/
+  //   2. TypeScript, ESLint, and Jest are defined here — nothing can
+  //      compile, lint, or test without these tools being installed first
+  //   3. The scripts block defines the vocabulary the whole team uses
+  //      (npm run dev, npm test, npm run build, etc.)
+  // ============================================================
+  // "name" is used as the package identifier if this were published to npm.
+  // For a private backend service it is just a human-readable label.
   "name": "ops-erp-backend",
+  // Semantic version of this application. Not used for npm publishing here,
+  // but ECS task definitions and the /health endpoint can expose this value.
   "version": "1.0.0",
   "description": "Mini Operations ERP — Backend API",
+  // "main" tells Node.js which file to execute when this package is imported
+  // as a module. For an Express server it points to the compiled entry point.
   "main": "dist/index.js",
+  // ── scripts ──────────────────────────────────────────────────────────────
+  // These are the commands the team runs. npm run <name> executes them.
   "scripts": {
+    // "dev" — starts the development server with hot-reload.
+    // ts-node-dev watches .ts files and restarts the process on changes.
+    // --respawn: restart automatically after crashes (not just on file changes)
+    // --transpile-only: skip TypeScript type checking for speed; tsc --noEmit handles type checks separately
+    // src/index.ts is the entry point
     "dev": "ts-node-dev --respawn --transpile-only src/index.ts",
+    // "build" — compiles all TypeScript in src/ to JavaScript in dist/
+    // --project tsconfig.json makes it use our specific config (not just defaults)
+    // This is what the Dockerfile runs to produce the production binary
     "build": "tsc --project tsconfig.json",
+    // "start" — runs the already-compiled JavaScript directly with Node.
+    // Used in production after "build" has been run. No TypeScript overhead.
     "start": "node dist/index.js",
+    // "lint" — checks all .ts files for ESLint rule violations
+    // --max-warnings 0 means even warnings fail the check — used in CI to enforce quality
     "lint": "eslint 'src/**/*.ts' --max-warnings 0",
+    // "lint:fix" — automatically fixes all auto-fixable lint violations
+    // Run this locally before committing to clean up small issues
     "lint:fix": "eslint 'src/**/*.ts' --fix",
+    // "typecheck" — runs the TypeScript compiler but produces NO output files
+    // --noEmit means "check types only, don't write to dist/"
+    // Used in CI to catch type errors without the overhead of a full build
     "typecheck": "tsc --noEmit",
+    // "test" — runs the Jest test suite
+    // --runInBand: runs test files sequentially (not in parallel workers)
+    //   WHY: tests share a real PostgreSQL database — parallel runs would interfere
+    // --forceExit: kills the process after tests complete even if Prisma connections linger
     "test": "jest --runInBand --forceExit",
+    // "test:coverage" — same as test but also generates a coverage report in backend/coverage/
     "test:coverage": "jest --runInBand --forceExit --coverage",
+    // ── Database scripts (all call the Prisma CLI) ──────────────────────────
+    // "db:migrate" — creates a new migration file from schema changes (dev only)
+    // This is how you update the database schema during development
     "db:migrate": "prisma migrate dev",
+    // "db:migrate:deploy" — applies existing migration files to the database WITHOUT
+    // creating new ones. Used in production (Dockerfile CMD) and CI test setup.
+    // It never prompts interactively, making it safe for automated environments.
     "db:migrate:deploy": "prisma migrate deploy",
+    // "db:generate" — regenerates the @prisma/client TypeScript types from schema.prisma
+    // Run this whenever you change schema.prisma so your TypeScript types stay in sync
     "db:generate": "prisma generate",
+    // "db:seed" — runs the seed script to populate the database with reference data
+    // Uses ts-node with the special tsconfig.seed.json (which includes prisma/seed.ts)
     "db:seed": "ts-node --project tsconfig.seed.json prisma/seed.ts",
+    // "db:reset" — drops the database, re-runs all migrations, then re-runs the seed
+    // --force skips the confirmation prompt. DESTRUCTIVE — only use in development.
     "db:reset": "prisma migrate reset --force",
+    // "db:studio" — opens Prisma Studio, a web-based database browser at localhost:5555
+    // Useful for inspecting data during development without writing SQL manually
     "db:studio": "prisma studio"
   },
+  // ── dependencies ─────────────────────────────────────────────────────────
+  // These packages are shipped with the application in production.
+  // They end up in the final Docker image's node_modules/.
   "dependencies": {
+    // Prisma's generated client — the TypeScript database query library.
+    // @prisma/client is the runtime package; "prisma" (in devDependencies) is the CLI.
+    // Types are auto-generated from schema.prisma — this is what you import in routes.
     "@prisma/client": "^5.16.0",
+    // bcryptjs — password hashing library (pure JavaScript, no native bindings).
+    // Used in auth routes to hash passwords on register and compare on login.
+    // The "js" suffix distinguishes it from the native "bcrypt" package.
     "bcryptjs": "^2.4.3",
+    // cors — Express middleware that sets Access-Control-Allow-Origin headers.
+    // Without this, browsers refuse to send requests from the React frontend
+    // (e.g., localhost:3000) to the Express backend (localhost:4000).
     "cors": "^2.8.5",
+    // dotenv — loads KEY=VALUE pairs from .env into process.env at startup.
+    // The pattern `import 'dotenv/config'` at the top of index.ts triggers this.
     "dotenv": "^16.4.5",
+    // express — the web framework. Handles HTTP routing, middleware, request/response.
     "express": "^4.19.2",
+    // express-async-errors — patches Express's Router so that errors thrown from
+    // async route handlers automatically reach the error middleware.
+    // Without this, `throw new AppError(404, '...')` in an async handler would
+    // produce an unhandled Promise rejection instead of a clean JSON error response.
     "express-async-errors": "^3.1.1",
+    // express-validator — declarative request validation using method chains.
+    // Example: body('email').isEmail().withMessage('Valid email required.')
+    // Used in every route to validate request bodies and query params.
     "express-validator": "^7.1.0",
+    // jsonwebtoken — creates and verifies JSON Web Tokens (JWTs).
+    // jwt.sign() creates a token on login; jwt.verify() validates it in auth middleware.
     "jsonwebtoken": "^9.0.2",
+    // morgan — HTTP request logger middleware.
+    // Logs every incoming request (method, path, status, response time).
+    // In this project, morgan is configured to pipe through winston so all logs
+    // are consistently structured.
     "morgan": "^1.10.0",
+    // prisma — the Prisma CLI (migrate, generate, studio commands).
+    // Listed as a runtime dependency so the Dockerfile can run `prisma migrate deploy`
+    // and `prisma generate` inside the container without devDependencies.
     "prisma": "^5.16.0",
+    // winston — structured logging library.
+    // Outputs colorized human-readable logs in development, JSON in production.
+    // JSON logs are machine-parseable by CloudWatch Logs Insights.
     "winston": "^3.13.0"
   },
+  // ── devDependencies ───────────────────────────────────────────────────────
+  // These packages are only used during development, building, linting, and testing.
+  // The Dockerfile's runner stage uses --only=production so these never reach the
+  // production container, keeping the image smaller and the attack surface smaller.
   "devDependencies": {
+    // @types/* packages provide TypeScript type declarations for JavaScript libraries
+    // that don't ship their own types. These are the bridge between JS libraries
+    // and TypeScript's type system.
+    // @types/bcryptjs — types for bcrypt.hash(), bcrypt.compare() return values
     "@types/bcryptjs": "^2.4.6",
+    // @types/cors — types for the cors() factory function
     "@types/cors": "^2.8.17",
+    // @types/express — THE most important type package here.
+    // Provides Request, Response, NextFunction, Router — used in EVERY route file.
     "@types/express": "^4.17.21",
+    // @types/jest — provides describe(), it(), expect(), beforeAll(), afterAll() etc.
     "@types/jest": "^29.5.12",
+    // @types/jsonwebtoken — provides jwt.verify(), jwt.sign(), jwt.TokenExpiredError
     "@types/jsonwebtoken": "^9.0.6",
+    // @types/morgan — types for morgan() factory
     "@types/morgan": "^1.9.9",
+    // @types/node — provides process.env, globalThis, Buffer, setTimeout, etc.
+    // Essential for any Node.js TypeScript project — without this,
+    // TypeScript doesn't know what `process` or `global` are.
     "@types/node": "^20.14.10",
+    // @types/supertest — types for the request(app).get(...).send(...).expect(...) test chain
     "@types/supertest": "^6.0.2",
+    // TypeScript ESLint — parser and plugin that teach ESLint to understand TypeScript.
+    // The parser converts .ts code to an AST that ESLint can analyze.
+    // The plugin adds TypeScript-specific rules (no-explicit-any, no-unused-vars, etc.)
     "@typescript-eslint/eslint-plugin": "^7.16.0",
     "@typescript-eslint/parser": "^7.16.0",
+    // eslint — the base linter engine. Catches bugs and enforces code style.
     "eslint": "^8.57.0",
+    // jest — the test runner. Finds test files, runs them, reports results.
     "jest": "^29.7.0",
+    // supertest — HTTP test client. Makes real HTTP requests to an Express app
+    // in-process (no actual network port needed). Returns responses as JavaScript objects.
     "supertest": "^7.0.0",
+    // ts-jest — a Jest transformer that compiles TypeScript on-the-fly during tests.
+    // Without this, Jest can't understand .ts files.
     "ts-jest": "^29.2.2",
+    // ts-node — TypeScript execution engine. Runs .ts files directly without
+    // pre-compiling to .js first. Used for npm run db:seed and one-off scripts.
     "ts-node": "^10.9.2",
+    // ts-node-dev — ts-node + file watcher. Restarts the process when .ts files change.
+    // Used for `npm run dev` — the development server with hot-reload.
     "ts-node-dev": "^2.0.0",
+    // typescript — the TypeScript compiler itself. tsc is the command it provides.
     "typescript": "^5.5.3"
   },
+  // engines tells npm/Node which Node.js version this project requires.
+  // Node 20 is the LTS version used in the Dockerfile (node:20-alpine).
   "engines": {
     "node": ">=20.0.0"
   }

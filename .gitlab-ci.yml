@@ -1,49 +1,67 @@
+# ============================================================
+# FILE: .gitlab-ci.yml
+# CONSTRUCTION ORDER: #45 — The very last file, written after everything else
+# HOW: touch .gitlab-ci.yml (at the project root)
+# WHY LAST: The CI/CD pipeline orchestrates EVERY stage of the project:
+#   - lint/typecheck (needs package.json, tsconfig.json, .eslintrc.json)
+#   - test (needs all route files, test files, schema, migrations)
+#   - build (needs Dockerfile)
+#   - package (needs Docker images working)
+#   - deploy (needs Terraform infrastructure provisioned)
+#   You can only write this file once all the stages it references exist.
+# WHAT THIS FILE DOES:
+#   GitLab reads this file on every git push and runs the defined jobs.
+#   Jobs are grouped into stages — all jobs in a stage run in parallel,
+#   and the next stage only starts when ALL jobs in the current stage pass.
+#   If any job fails, the pipeline stops and subsequent stages don't run.
+# ============================================================
+
 # ─── Mini Operations ERP — GitLab CI/CD Pipeline ─────────────────────────────
-#
-# Stages:
-#   validate  → lint + typecheck (all branches)
-#   test      → integration tests against real Postgres (all branches)
-#   build     → tsc + vite build artifacts (all branches)
-#   package   → Docker images pushed to GitLab Container Registry (main + develop)
-#   deploy    → ECS Fargate deployment (main only, MANUAL gate)
-
+# Stages define the ORDER of execution.
+# All jobs in a stage run in parallel; next stage starts only when all pass.
 stages:
-  - validate
-  - test
-  - build
-  - package
-  - deploy
+  - validate   # Lint + typecheck — fast feedback on code quality
+  - test       # Integration tests against real PostgreSQL
+  - build      # Compile TypeScript + build frontend
+  - package    # Build Docker images and push to GitLab Container Registry
+  - deploy     # Deploy to AWS ECS (MANUAL gate on main branch)
 
+# Global variables available to all jobs.
 variables:
   NODE_VERSION: "20"
   AWS_REGION: ap-south-1
   DOCKER_DRIVER: overlay2
   DOCKER_TLS_CERTDIR: ""
-  # Non-secret infrastructure values — hardcoded (no GitLab variable needed)
+
+  # Non-secret AWS infrastructure identifiers.
+  # These identify WHERE to deploy (not credentials for HOW to authenticate).
   ECR_REGISTRY: "690081480550.dkr.ecr.ap-south-1.amazonaws.com"
   ECR_REPO_BACKEND: "ops-erp-backend-dev"
   ECR_REPO_FRONTEND: "ops-erp-frontend-dev"
   ECS_CLUSTER: "ops-erp-cluster-dev"
   ECS_SERVICE_BACKEND: "ops-erp-backend-dev"
   ECS_SERVICE_FRONTEND: "ops-erp-frontend-dev"
-  # Secrets — only these two need to be set in GitLab Settings → CI/CD → Variables
-  # AWS_ACCESS_KEY_ID     (masked+protected) — already added
-  # AWS_SECRET_ACCESS_KEY (masked+protected) — already added
+  # Secrets set in GitLab Settings → CI/CD → Variables (masked + protected):
+  #   AWS_ACCESS_KEY_ID     — IAM ci_deploy user access key
+  #   AWS_SECRET_ACCESS_KEY — IAM ci_deploy user secret key
 
-# ── VALIDATE ──────────────────────────────────────────────────────────────────
+# ── STAGE: validate ───────────────────────────────────────────────────────────
+# Runs on EVERY push to ANY branch. Fast feedback before tests.
 
 backend:lint:
   stage: validate
-  image: node:20-alpine
+  image: node:20-alpine  # Fresh Alpine container for each job
   cache:
+    # Cache key per branch per project — faster npm ci on subsequent runs.
     key: backend-node-$CI_COMMIT_REF_SLUG
-    paths: [backend/node_modules/]
+    paths: [backend/node_modules/]  # Cache the installed packages
   before_script:
+    # `cd backend` then run commands relative to it.
     - cd backend && npm ci --legacy-peer-deps
   script:
-    - npm run lint
+    - npm run lint  # eslint 'src/**/*.ts' --max-warnings 0
   rules:
-    - when: always
+    - when: always  # Run on every push, any branch
 
 backend:typecheck:
   stage: validate
@@ -52,9 +70,11 @@ backend:typecheck:
     key: backend-node-$CI_COMMIT_REF_SLUG
     paths: [backend/node_modules/]
   before_script:
-    - cd backend && npm ci --legacy-peer-deps && npx prisma generate
+    - cd backend && npm ci --legacy-peer-deps
+    # Must generate Prisma client BEFORE typechecking — TypeScript needs @prisma/client types.
+    - npx prisma generate
   script:
-    - npm run typecheck
+    - npm run typecheck  # tsc --noEmit — checks types without compiling
   rules:
     - when: always
 
@@ -84,46 +104,71 @@ frontend:typecheck:
   rules:
     - when: always
 
-# ── TEST ──────────────────────────────────────────────────────────────────────
+# ── STAGE: test ───────────────────────────────────────────────────────────────
+# Runs integration tests against a REAL PostgreSQL database.
+# A fresh postgres container is spun up as a service for each pipeline run.
 
 backend:test:
   stage: test
   image: node:20-alpine
+
+  # services: additional containers run alongside the job container.
+  # GitLab links them via internal Docker network.
   services:
     - name: postgres:15-alpine
-      alias: postgres
+      alias: postgres  # Hostname — accessible as 'postgres' inside the job container.
+      # variables defined under services set environment variables FOR the service container.
       variables:
         POSTGRES_DB: ops_erp_test
         POSTGRES_USER: ops_user
         POSTGRES_PASSWORD: devpassword123
+
+  # These variables are set in the JOB container (not the postgres service).
   variables:
+    # TEST_DATABASE_URL: points at the postgres service container.
+    # 'postgres' resolves to the service container via GitLab's internal network.
     TEST_DATABASE_URL: postgresql://ops_user:devpassword123@postgres:5432/ops_erp_test?schema=public
     JWT_SECRET: ci_test_secret_not_for_production_abcdef1234567890
     NODE_ENV: test
     LOG_LEVEL: error
+
   cache:
     key: backend-node-$CI_COMMIT_REF_SLUG
     paths: [backend/node_modules/]
+
   before_script:
+    # Alpine doesn't have openssl by default — Prisma query engine requires it.
     - apk add --no-cache openssl
     - cd backend
     - npm ci --legacy-peer-deps
     - npx prisma generate
+    # Apply migrations to the fresh test database BEFORE running tests.
+    # `prisma migrate deploy` applies all migration files in order.
+    # DATABASE_URL is set from TEST_DATABASE_URL.
     - DATABASE_URL=$TEST_DATABASE_URL npx prisma migrate deploy
+
   script:
-    - npm test
+    - npm test  # jest --runInBand --forceExit (all 5 mandatory tests run here)
+
+  # coverage: regex to extract the coverage percentage from Jest's output.
+  # GitLab uses this to display a coverage badge.
   coverage: '/Lines\s*:\s*(\d+\.?\d*)%/'
+
+  # artifacts: files to preserve after the job finishes.
   artifacts:
     reports:
       coverage_report:
         coverage_format: cobertura
         path: backend/coverage/cobertura-coverage.xml
     paths: [backend/coverage/]
-    expire_in: 7 days
+    expire_in: 7 days  # Delete artifacts after 7 days to save storage
+
   rules:
     - when: always
 
-# ── BUILD ─────────────────────────────────────────────────────────────────────
+# ── STAGE: build ──────────────────────────────────────────────────────────────
+# Compile TypeScript and build the Vite frontend bundle.
+# Artifacts from these jobs are used by the package stage.
 
 backend:build:
   stage: build
@@ -137,7 +182,7 @@ backend:build:
     - npm ci --legacy-peer-deps
     - npx prisma generate
   script:
-    - npm run build
+    - npm run build  # tsc → outputs to backend/dist/
   artifacts:
     paths: [backend/dist/]
     expire_in: 1 day
@@ -153,27 +198,35 @@ frontend:build:
   before_script:
     - cd frontend && npm ci --legacy-peer-deps
   script:
-    - npm run build
+    - npm run build  # vite build → outputs to frontend/dist/
   artifacts:
     paths: [frontend/dist/]
     expire_in: 1 day
   rules:
     - when: always
 
-# ── PACKAGE ───────────────────────────────────────────────────────────────────
+# ── STAGE: package ────────────────────────────────────────────────────────────
+# Build Docker images and push to the GitLab Container Registry.
+# Only runs on main and develop branches (not feature branches).
 
+# YAML anchor: .docker_package defines common config shared by both package jobs.
+# <<: *docker_package merges this config into each job that references it.
 .docker_package: &docker_package
   stage: package
-  image: docker:24-dind
-  services: [docker:24-dind]
+  image: docker:24-dind  # Docker-in-Docker — needed to run `docker build` inside CI
+  services: [docker:24-dind]  # The DinD daemon service
   before_script:
+    # Log in to GitLab's built-in Container Registry.
+    # CI_REGISTRY_USER, CI_REGISTRY_PASSWORD, CI_REGISTRY are automatically set by GitLab.
     - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
   rules:
     - if: $CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH == "develop"
 
 package:backend:
-  <<: *docker_package
+  <<: *docker_package  # Inherit all common docker_package config
   script:
+    # Build with two tags: the commit SHA (immutable, traceable) and 'latest' (convenience).
+    # CI_COMMIT_SHORT_SHA: first 8 characters of the git commit hash.
     - |
       docker build -t $CI_REGISTRY_IMAGE/backend:$CI_COMMIT_SHORT_SHA \
                    -t $CI_REGISTRY_IMAGE/backend:latest \
@@ -191,48 +244,68 @@ package:frontend:
       docker push $CI_REGISTRY_IMAGE/frontend:$CI_COMMIT_SHORT_SHA
       docker push $CI_REGISTRY_IMAGE/frontend:latest
 
-# ── DEPLOY ────────────────────────────────────────────────────────────────────
-# Manual gate — only runs on main after package succeeds.
+# ── STAGE: deploy ─────────────────────────────────────────────────────────────
+# Deploys to AWS ECS. MANUAL gate — requires human to click "play" in GitLab UI.
+# Only available on the main branch (not develop, not feature branches).
 #
-# Uses alpine + crane (pre-built binary) + awscli (pip).
-# No Docker daemon required. crane copies images registry-to-registry.
-# .ci/update-task-def.py handles ECS task definition JSON.
+# DEPLOYMENT PROCESS:
+# 1. crane: copies image from GitLab registry → AWS ECR (no Docker daemon needed)
+# 2. .ci/update-task-def.py: fetches current ECS task definition, updates image URI
+# 3. aws ecs register-task-definition: creates a new revision
+# 4. aws ecs update-service: tells ECS to deploy the new revision
+# 5. aws ecs wait services-stable: blocks until deployment completes successfully
 #
-# Required CI/CD variables (Settings → CI/CD → Variables, masked + protected):
-#   AWS_ACCESS_KEY_ID       IAM ci_deploy user
-#   AWS_SECRET_ACCESS_KEY   IAM ci_deploy user
-#   ECR_REGISTRY:           690081480550.dkr.ecr.ap-south-1.amazonaws.com
-#   ECR_REPO_BACKEND:       ops-erp-backend-dev
-#   ECR_REPO_FRONTEND:      ops-erp-frontend-dev
-#   ECS_CLUSTER:            ops-erp-cluster-dev
-#   ECS_SERVICE_BACKEND:    ops-erp-backend-dev
-#   ECS_SERVICE_FRONTEND:   ops-erp-frontend-dev
+# Required GitLab CI Variables (masked + protected):
+#   AWS_ACCESS_KEY_ID     — IAM ci_deploy user key
+#   AWS_SECRET_ACCESS_KEY — IAM ci_deploy user secret
 
+# Another YAML anchor for the before_script shared by deploy jobs.
 .deploy_before: &deploy_before
   - apk add --no-cache curl python3 py3-pip
   - pip3 install awscli --quiet --break-system-packages
+  # Download crane — a tool for copying Docker images between registries WITHOUT Docker daemon.
+  # Using crane instead of docker pull/push avoids needing Docker-in-Docker in the deploy stage.
   - CRANE_VER=$(curl -sf https://api.github.com/repos/google/go-containerregistry/releases/latest | grep '"tag_name"' | cut -d'"' -f4)
   - curl -sL "https://github.com/google/go-containerregistry/releases/download/${CRANE_VER}/go-containerregistry_Linux_x86_64.tar.gz" | tar -xz crane
   - chmod +x crane && mv crane /usr/local/bin/crane
+  # Authenticate crane to both registries.
   - crane auth login $CI_REGISTRY -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD
+  # AWS ECR authentication: `aws ecr get-login-password` returns a temporary password.
   - crane auth login $ECR_REGISTRY -u AWS -p "$(aws ecr get-login-password --region $AWS_REGION)"
 
 deploy:backend:
   stage: deploy
-  image: alpine:3.19
-  before_script: *deploy_before
+  image: alpine:3.19  # Minimal image — we install tools in before_script
+  before_script: *deploy_before  # Run the shared setup above
   script:
+    # Step 1: Copy the image from GitLab registry to AWS ECR.
     - crane copy $CI_REGISTRY_IMAGE/backend:$CI_COMMIT_SHORT_SHA $ECR_REGISTRY/$ECR_REPO_BACKEND:$CI_COMMIT_SHORT_SHA
     - crane tag $ECR_REGISTRY/$ECR_REPO_BACKEND:$CI_COMMIT_SHORT_SHA latest
+
+    # Step 2: Update the ECS task definition with the new image URI.
+    # aws ecs describe-task-definition: fetches current task definition JSON
+    # python3 .ci/update-task-def.py: parses JSON, updates image field, strips read-only fields
+    # > new-task-def.json: saves the modified JSON to a file
     - NEW_IMAGE="$ECR_REGISTRY/$ECR_REPO_BACKEND:$CI_COMMIT_SHORT_SHA"
     - aws ecs describe-task-definition --task-definition $ECS_SERVICE_BACKEND --region $AWS_REGION --query taskDefinition --output json | python3 .ci/update-task-def.py backend "$NEW_IMAGE" > new-task-def.json
+
+    # Step 3: Register the new task definition revision.
+    # Returns the ARN of the new revision (e.g., arn:aws:ecs:...:task-definition/ops-erp-backend-dev:5)
     - NEW_ARN=$(aws ecs register-task-definition --region $AWS_REGION --cli-input-json file://new-task-def.json --query taskDefinition.taskDefinitionArn --output text)
+
+    # Step 4: Update the ECS service to use the new task definition.
+    # ECS starts a rolling deployment: new tasks start → old tasks stop.
     - aws ecs update-service --cluster $ECS_CLUSTER --service $ECS_SERVICE_BACKEND --task-definition "$NEW_ARN" --region $AWS_REGION
+
+    # Step 5: Wait until the deployment is stable.
+    # This command BLOCKS until all new tasks are running and healthy (ALB health check passing).
+    # If the deployment fails (new task crashes), this command fails → CI job fails → red pipeline.
     - aws ecs wait services-stable --cluster $ECS_CLUSTER --services $ECS_SERVICE_BACKEND --region $AWS_REGION
+
   rules:
     - if: $CI_COMMIT_BRANCH == "main"
-      when: manual
-  environment: production
+      when: manual    # Requires human approval — won't run automatically
+  environment: production  # Tags this deployment as production in GitLab's Environments view
 
 deploy:frontend:
   stage: deploy

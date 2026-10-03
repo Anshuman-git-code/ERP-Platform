@@ -1,59 +1,140 @@
-// Mini Operations ERP — Prisma Schema
-// Covers: Inventory, Work Orders, Internal Transfers, Customer Orders
+// ============================================================
+// FILE: backend/prisma/schema.prisma
+// CONSTRUCTION ORDER: #9 — THE MOST IMPORTANT FILE IN THE PROJECT
+// HOW: The backend/ folder was already initialized (package.json exists).
+//      The developer ran:
+//        npx prisma init
+//      This command created:
+//        1. prisma/schema.prisma (a blank template with generator + datasource)
+//        2. Added DATABASE_URL hint to .env
+//      Then the developer REPLACED the blank template content by typing
+//      the complete schema from scratch — designing all models, enums,
+//      relations, and constraints.
+// WHY NOW: This file is the single source of truth for the ENTIRE data model.
+//      Every other file in the project depends on it:
+//        - Running `npx prisma generate` after writing this file creates
+//          the @prisma/client TypeScript types that ALL routes import
+//        - Running `npx prisma migrate dev` creates the SQL migration file
+//        - Every route file's type-safety comes from types generated HERE
+//      You CANNOT write a single route without the schema existing first.
+//
+// AFTER WRITING THIS FILE, the developer ran:
+//   npx prisma generate          → creates TypeScript types in node_modules/@prisma/client
+//   npx prisma migrate dev --name init_ops_erp  → creates migration.sql, applies to DB
+// ============================================================
 
+// ── Generator block ───────────────────────────────────────────────────────────
+// This tells Prisma what to generate when you run `prisma generate`.
+// "prisma-client-js" means generate a JavaScript/TypeScript client library.
+// After generation, you import it as: import { PrismaClient } from '@prisma/client'
 generator client {
   provider = "prisma-client-js"
 }
 
+// ── Datasource block ──────────────────────────────────────────────────────────
+// Tells Prisma which database to connect to and how.
+// "postgresql" is the database type — Prisma also supports MySQL, SQLite, MongoDB.
+// env("DATABASE_URL") reads the connection string from the DATABASE_URL
+// environment variable (defined in .env, never hardcoded in source).
 datasource db {
   provider = "postgresql"
   url      = env("DATABASE_URL")
 }
 
-// ─── Enums ────────────────────────────────────────────────────────────────────
+// ── ENUMS ─────────────────────────────────────────────────────────────────────
+// Enums are written BEFORE models because models reference them.
+// Prisma generates TypeScript enum objects from these that are importable:
+//   import { Role, WorkOrderStatus } from '@prisma/client'
+// PostgreSQL stores these as native ENUM types (enforced at the DB level).
 
+// Role — controls what each user can do (RBAC = Role-Based Access Control)
+// ADMIN: full access to everything
+// OPERATIONS: manages inventory, work orders, and transfers
+// SALES: creates and manages customer orders
+// The @default(SALES) on the User model means new users get SALES role by default.
 enum Role {
   ADMIN
   OPERATIONS
   SALES
 }
 
+// WorkOrderStatus — the lifecycle of a maintenance/production task.
+// Transitions are FORWARD ONLY: ASSIGNED → IN_PROGRESS → COMPLETED
+// This is enforced in the PATCH /:id/status route in workOrders.ts.
 enum WorkOrderStatus {
-  ASSIGNED
-  IN_PROGRESS
-  COMPLETED
+  ASSIGNED      // Just created, not yet started
+  IN_PROGRESS   // Work has begun (startedAt timestamp set)
+  COMPLETED     // Work is done (completedAt timestamp set)
 }
 
+// TransferStatus — the lifecycle of moving stock between locations.
+// REQUESTED → DISPATCHED → RECEIVED (normal path)
+// REQUESTED → CANCELLED (only ADMIN, only from REQUESTED state)
+// Source stock decrements at DISPATCHED. Destination increments at RECEIVED.
 enum TransferStatus {
-  REQUESTED
-  DISPATCHED
-  RECEIVED
-  CANCELLED
+  REQUESTED   // Transfer created, not yet sent
+  DISPATCHED  // Stock left the source location (physicalQty decremented at source)
+  RECEIVED    // Stock arrived at destination (physicalQty incremented at destination)
+  CANCELLED   // Transfer was cancelled before dispatch (no inventory changes needed)
 }
 
+// OrderStatus — the lifecycle of a customer order.
+// PENDING → CONFIRMED: reserves stock (increments reservedQty)
+// CONFIRMED → CANCELLED: releases reserved stock (decrements reservedQty)
+// PENDING → CANCELLED: no inventory changes needed
 enum OrderStatus {
-  PENDING
-  CONFIRMED
-  CANCELLED
+  PENDING    // Order created, stock NOT yet reserved
+  CONFIRMED  // Stock reserved (reservedQty incremented on inventory rows)
+  CANCELLED  // Order cancelled (reservation released if was CONFIRMED)
 }
 
+// TransactionType — direction of a stock movement in the audit log.
+// IN: stock entering a location (receive transfer, initial stock, restock)
+// OUT: stock leaving a location (dispatch transfer, damaged goods)
 enum TransactionType {
   IN
   OUT
 }
 
-// ─── Models ───────────────────────────────────────────────────────────────────
+// ── MODELS ────────────────────────────────────────────────────────────────────
+// Models are written in dependency order: if model A references model B,
+// then B must be defined first (or at least before prisma generate runs).
+// Relations are defined on BOTH sides — Prisma requires this.
 
+// ── User ──────────────────────────────────────────────────────────────────────
+// A person who logs into the system. Has a role that controls their permissions.
 model User {
+  // @id — this field is the primary key
+  // @default(cuid()) — Prisma generates a Collision-resistant Unique ID automatically.
+  // CUIDs are better than auto-increment integers for APIs because:
+  //   1. They don't expose record count (attacker can't guess total users from id=42)
+  //   2. They're URL-safe (no encoding needed)
+  //   3. They're globally unique (safe in distributed systems)
   id        String   @id @default(cuid())
   name      String
+  // @unique — enforced at both database level (unique index) and application level.
+  // Prisma will throw PrismaClientKnownRequestError (P2002) if you try to insert
+  // a duplicate email. The errorHandler.ts translates P2002 to HTTP 409.
   email     String   @unique
+  // password stores the bcrypt HASH, never the plaintext password.
+  // bcrypt hash is ~60 characters long.
   password  String
+  // Role enum — defaults to SALES (least privilege by default)
   role      Role     @default(SALES)
+  // isActive allows disabling a user without deleting them.
+  // Deleted records can't be queried; inactive records can be audited.
   isActive  Boolean  @default(true)
+  // @default(now()) — set automatically to current timestamp on INSERT
   createdAt DateTime @default(now())
+  // @updatedAt — set automatically to current timestamp on every UPDATE
   updatedAt DateTime @updatedAt
 
+  // ── Relations ──────────────────────────────────────────────────────────────
+  // These are virtual fields — they don't create columns in the database.
+  // Prisma uses them to generate JOIN query helpers.
+  // Named relations ("AssignedTo", "CreatedBy") are REQUIRED when a model has
+  // multiple foreign keys to the same table. Without names, Prisma can't tell
+  // which relation is which.
   workOrdersAssigned  WorkOrder[]          @relation("AssignedTo")
   workOrdersCreated   WorkOrder[]          @relation("CreatedBy")
   transfersRequested  StockTransfer[]      @relation("RequestedBy")
@@ -62,18 +143,30 @@ model User {
   ordersCreated       CustomerOrder[]
   stockTransactions   InventoryTransaction[]
 
+  // @@map changes the database TABLE name while keeping the TypeScript model name.
+  // Convention: TypeScript uses PascalCase singular (User), PostgreSQL uses
+  // snake_case plural (users).
   @@map("users")
 }
 
+// ── Location ──────────────────────────────────────────────────────────────────
+// A physical place where stock is stored or used.
+// Examples from seed.ts: "Warehouse A", "Warehouse B", "Shop Floor"
 model Location {
   id        String   @id @default(cuid())
+  // @unique on name — each location has a unique human-readable name.
+  // This allows seed.ts to use upsert with `where: { name: 'Warehouse A' }`.
   name      String   @unique
+  // address is nullable (String?) — the ? makes it optional in Prisma queries
+  // and generates a nullable column (TEXT NULL) in PostgreSQL.
   address   String?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  // Relations — all the things that reference a location
   inventory     Inventory[]
   workOrders    WorkOrder[]
+  // Named relations because StockTransfer has TWO location foreign keys
   transfersFrom StockTransfer[] @relation("SourceLocation")
   transfersTo   StockTransfer[] @relation("DestLocation")
   orders        CustomerOrder[]
@@ -81,11 +174,24 @@ model Location {
   @@map("locations")
 }
 
+// ── Item ──────────────────────────────────────────────────────────────────────
+// The product catalog — what physical things exist in the warehouse.
+// An Item has no quantity — quantity lives in Inventory (item + location + batch).
 model Item {
   id        String   @id @default(cuid())
   name      String
+  // sku — Stock Keeping Unit. The unique identifier for this product type.
+  // @unique enforces no two items have the same SKU.
   sku       String   @unique
+  // category is optional — items can be uncategorized
   category  String?
+  // Decimal instead of Float for money. IMPORTANT:
+  // Float uses IEEE 754 floating-point arithmetic which has rounding errors.
+  // 0.1 + 0.2 = 0.30000000000000004 in Float.
+  // Decimal uses exact decimal arithmetic — crucial for prices and financial data.
+  // @db.Decimal(10, 2) sets PostgreSQL column type to NUMERIC(10,2):
+  //   10 = total digits, 2 = digits after decimal point
+  //   Max value: 99999999.99
   unitPrice Decimal  @db.Decimal(10, 2)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -95,130 +201,164 @@ model Item {
   transfers  StockTransfer[]
   orderItems OrderItem[]
 
+  // @@index creates a B-tree index on sku for fast lookups.
+  // The @@unique constraint already creates an implicit index,
+  // but this makes the intent explicit and documents the access pattern.
   @@index([sku])
   @@map("items")
 }
 
-// ─── Inventory ────────────────────────────────────────────────────────────────
-// One row per (item, location, batch).
-// batchNumber uses 'DEFAULT' when no batch is specified — ensures @@unique works
-// correctly with non-null values (PostgreSQL NULL != NULL breaks uniqueness).
-// physicalQty = actual stock on hand
-// reservedQty = stock held by confirmed customer orders
-// availableQty = physicalQty - reservedQty  (COMPUTED, never stored)
-
+// ── Inventory ─────────────────────────────────────────────────────────────────
+// THE CENTRAL MODEL. One row per (item, location, batch) combination.
+//
+// KEY DESIGN DECISIONS:
+// 1. physicalQty = actual stock on hand (what you can physically count)
+// 2. reservedQty = stock held by confirmed customer orders (cannot be used)
+// 3. availableQty = physicalQty - reservedQty (COMPUTED, NEVER STORED)
+//    → availableQty is always computed at read time by withAvailable() helper
+//    → Never storing it prevents the two columns from getting out of sync
+//
+// 4. batchNumber defaults to 'DEFAULT' (not NULL).
+//    WHY: PostgreSQL NULL != NULL, so:
+//      @@unique([itemId, locationId, batchNumber]) with NULL would allow
+//      MULTIPLE rows with NULL batch for the same item+location.
+//    Using 'DEFAULT' as the string ensures the uniqueness constraint works correctly.
 model Inventory {
   id           String   @id @default(cuid())
   itemId       String
   locationId   String
+  // batchNumber tracks different production batches of the same item.
+  // When no batch is specified, 'DEFAULT' is used.
   batchNumber  String   @default("DEFAULT")
-  physicalQty  Int      @default(0)
-  reservedQty  Int      @default(0)
+  physicalQty  Int      @default(0)  // What is physically present
+  reservedQty  Int      @default(0)  // What is spoken for by confirmed orders
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
+  // @relation(fields, references) defines the foreign key.
+  // fields: [itemId] is the column in THIS table.
+  // references: [id] is the column in the referenced table (Item).
   item         Item     @relation(fields: [itemId], references: [id])
   location     Location @relation(fields: [locationId], references: [id])
   transactions InventoryTransaction[]
   orderItems   OrderItem[]
 
-  // Prevents duplicate inventory rows for the same item/location/batch combo.
-  // batchNumber is always non-null (defaults to 'DEFAULT') so this constraint
-  // behaves deterministically.
+  // @@unique([itemId, locationId, batchNumber]) — prevents duplicate rows.
+  // If you try to create a second row with the same item+location+batch,
+  // PostgreSQL throws a unique constraint violation.
+  // Prisma catches this as P2002 → errorHandler converts to HTTP 409.
   @@unique([itemId, locationId, batchNumber])
+  // @@index on foreign keys — speeds up queries like:
+  //   "find all inventory for item X" or "find all inventory at location Y"
   @@index([itemId])
   @@index([locationId])
   @@map("inventory")
 }
 
-// ─── Inventory Transaction ────────────────────────────────────────────────────
-// Audit log for every stock movement.
-// The `referenceKey` is an idempotency key — an optional unique string
-// (e.g. "transfer-<id>-dispatch") that prevents the same logical transaction
-// from being recorded twice. Set it whenever the caller controls the key.
-
+// ── InventoryTransaction ──────────────────────────────────────────────────────
+// The audit log for every stock movement.
+// Every time physicalQty changes, a transaction record is created.
+// This provides a complete history: who moved what, when, and why.
 model InventoryTransaction {
   id              String          @id @default(cuid())
   inventoryId     String
-  transactionType TransactionType
-  quantity        Int
-  reason          String?
-  referenceKey    String?         @unique  // idempotency key — unique when provided
+  transactionType TransactionType  // IN or OUT
+  quantity        Int              // How many units moved
+  reason          String?          // Human-readable explanation (optional)
+
+  // referenceKey — the idempotency key.
+  // String? means it is NULLABLE — not every transaction needs one.
+  // @unique means when provided, it must be globally unique.
+  // PostgreSQL behaviour: NULL values in a unique column do NOT violate
+  // uniqueness (multiple NULLs are allowed). So:
+  //   - Omitted → NULL → multiple allowed (normal adjustments)
+  //   - Provided → must be unique (prevents duplicate transactions)
+  // Used in transfers.ts: referenceKey: `dispatch-${transferId}-${rowId}`
+  //   If dispatch is called twice (retry), the second call fails with P2002
+  //   instead of creating a duplicate deduction.
+  referenceKey    String?         @unique
+
   createdById     String
   createdAt       DateTime        @default(now())
 
   inventory   Inventory @relation(fields: [inventoryId], references: [id])
   createdBy   User      @relation(fields: [createdById], references: [id])
 
-  @@index([inventoryId])
-  @@index([createdAt])
+  @@index([inventoryId])  // Fast lookup: "all transactions for inventory row X"
+  @@index([createdAt])    // Fast lookup: "transactions between date X and Y"
   @@map("inventory_transactions")
 }
 
-// ─── Work Order ───────────────────────────────────────────────────────────────
-// Tracks what materials are needed, at which location, for which task.
-// shortageQty is NOT stored — computed at read time from live inventory.
-
+// ── WorkOrder ─────────────────────────────────────────────────────────────────
+// A task requiring specific materials at a specific location.
+// Example: "We need 20 steel rods at Shop Floor for a production run."
 model WorkOrder {
   id              String          @id @default(cuid())
-  workOrderNumber String          @unique
+  workOrderNumber String          @unique  // Human-readable: WO-00001
   locationId      String
   itemId          String
-  requiredQty     Int
-  assignedToId    String
-  status          WorkOrderStatus @default(ASSIGNED)
+  requiredQty     Int              // How many units are needed
+  assignedToId    String           // Which user is responsible
+  status          WorkOrderStatus  @default(ASSIGNED)
   notes           String?
   createdById     String
-  startedAt       DateTime?
-  completedAt     DateTime?
-  createdAt       DateTime        @default(now())
-  updatedAt       DateTime        @updatedAt
+  startedAt       DateTime?        // Set when status → IN_PROGRESS
+  completedAt     DateTime?        // Set when status → COMPLETED
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
 
-  // Item name/SKU snapshot — for historical display if item data changes
+  // SNAPSHOT FIELDS — itemName and itemSku are stored at creation time.
+  // WHY: If the Item record is later renamed or its SKU changes, the work order
+  // should still show what the item was called when the order was created.
+  // This is the "historical record" pattern — denormalize for auditability.
   itemName        String
   itemSku         String
 
   location    Location @relation(fields: [locationId], references: [id])
   item        Item     @relation(fields: [itemId], references: [id])
+  // Named relations because User has TWO relations to WorkOrder
   assignedTo  User     @relation("AssignedTo", fields: [assignedToId], references: [id])
   createdBy   User     @relation("CreatedBy", fields: [createdById], references: [id])
 
-  @@index([status])
-  @@index([locationId])
+  @@index([status])      // Fast filter: "all ASSIGNED work orders"
+  @@index([locationId])  // Fast filter: "all work orders at location X"
   @@map("work_orders")
 }
 
-// ─── Stock Transfer ───────────────────────────────────────────────────────────
-// Moves stock from one location to another.
-// Business rules:
-//   DISPATCH  → source physicalQty decrements; destination unchanged
-//   RECEIVE   → destination physicalQty increments; status guard prevents double-receipt
-
+// ── StockTransfer ─────────────────────────────────────────────────────────────
+// Moves stock from one location to another through a 3-step lifecycle.
+// Business rule: source decrements at DISPATCH, destination increments at RECEIPT.
+// This models reality: stock is "in transit" between dispatch and receipt.
 model StockTransfer {
-  id              String         @id @default(cuid())
-  transferNumber  String         @unique
-  sourceLocationId    String
-  destLocationId      String
-  itemId          String
-  quantity        Int
-  status          TransferStatus @default(REQUESTED)
-  notes           String?
-  requestedById   String
-  dispatchedById  String?
-  receivedById    String?
-  dispatchedAt    DateTime?
-  receivedAt      DateTime?
-  createdAt       DateTime       @default(now())
-  updatedAt       DateTime       @updatedAt
+  id               String         @id @default(cuid())
+  transferNumber   String         @unique  // Human-readable: TR-00001
+  sourceLocationId String
+  destLocationId   String
+  itemId           String
+  quantity         Int
+  status           TransferStatus @default(REQUESTED)
+  notes            String?
+  requestedById    String         // Who created the transfer request
 
-  // Item snapshot for display
+  // These are nullable (String?) because they are only filled in as
+  // the transfer progresses through its lifecycle states.
+  dispatchedById  String?         // Who dispatched (filled at DISPATCHED)
+  receivedById    String?         // Who received (filled at RECEIVED)
+  dispatchedAt    DateTime?       // When dispatched
+  receivedAt      DateTime?       // When received
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+
+  // Snapshot fields — same reasoning as WorkOrder
   itemName        String
   itemSku         String
 
+  // Named relations because Location has TWO relations to StockTransfer
   sourceLocation  Location @relation("SourceLocation", fields: [sourceLocationId], references: [id])
   destLocation    Location @relation("DestLocation", fields: [destLocationId], references: [id])
   item            Item     @relation(fields: [itemId], references: [id])
   requestedBy     User     @relation("RequestedBy", fields: [requestedById], references: [id])
+  // User? makes the relation optional (matches the nullable foreign key above)
   dispatchedBy    User?    @relation("DispatchedBy", fields: [dispatchedById], references: [id])
   receivedBy      User?    @relation("ReceivedBy", fields: [receivedById], references: [id])
 
@@ -228,28 +368,27 @@ model StockTransfer {
   @@map("stock_transfers")
 }
 
-// ─── Customer Order ───────────────────────────────────────────────────────────
-// Sales users create orders that reserve available inventory.
-// Reservation increments reservedQty on the target Inventory row.
-// Cancellation decrements reservedQty (releases the reservation).
-
+// ── CustomerOrder ─────────────────────────────────────────────────────────────
+// A sales order. When CONFIRMED, reserves stock from inventory.
+// When CANCELLED (from CONFIRMED), releases the reservation.
 model CustomerOrder {
   id            String      @id @default(cuid())
-  orderNumber   String      @unique
+  orderNumber   String      @unique  // Human-readable: ORD-1720000000000-ABC12
   customerName  String
-  customerPhone String?
-  locationId    String
+  customerPhone String?     // Optional contact number
+  locationId    String      // Which warehouse/location fulfils this order
   status        OrderStatus @default(PENDING)
-  totalQty      Int         @default(0)
+  totalQty      Int         @default(0)  // Sum of all item quantities
   notes         String?
   createdById   String
-  confirmedAt   DateTime?
-  cancelledAt   DateTime?
+  confirmedAt   DateTime?   // Set when CONFIRMED
+  cancelledAt   DateTime?   // Set when CANCELLED
   createdAt     DateTime    @default(now())
   updatedAt     DateTime    @updatedAt
 
   location  Location    @relation(fields: [locationId], references: [id])
   createdBy User        @relation(fields: [createdById], references: [id])
+  // items is the list of order line items (what was ordered)
   items     OrderItem[]
 
   @@index([status])
@@ -257,20 +396,28 @@ model CustomerOrder {
   @@map("customer_orders")
 }
 
+// ── OrderItem ─────────────────────────────────────────────────────────────────
+// A line item on a CustomerOrder. One row per product in the order.
+// Example: Order #123 has 5 units of Steel Rod from inventory row X.
 model OrderItem {
   id          String   @id @default(cuid())
   orderId     String
-  inventoryId String
+  inventoryId String   // Which specific inventory row is being reserved
   quantity    Int
 
-  // Item snapshot for historical display
+  // Snapshot fields — capture prices and names at order time.
+  // If an item's price changes tomorrow, existing orders still show the
+  // price that was agreed when the order was placed.
   itemName    String
   itemSku     String
   unitPrice   Decimal  @db.Decimal(10, 2)
   createdAt   DateTime @default(now())
 
+  // onDelete: Cascade — if the CustomerOrder is deleted, all its OrderItems
+  // are automatically deleted too (they have no meaning without the parent order).
   order     CustomerOrder @relation(fields: [orderId], references: [id], onDelete: Cascade)
   inventory Inventory     @relation(fields: [inventoryId], references: [id])
+  // itemId stored directly (redundant with inventoryId→itemId) for query efficiency
   item      Item          @relation(fields: [itemId], references: [id])
   itemId    String
 
