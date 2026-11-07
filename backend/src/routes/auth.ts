@@ -58,4 +58,16 @@ router.get('/me', authenticate, (req: AuthenticatedRequest, res: Response) => {
   return res.json({ success: true, user: req.user });
 });
 
+// ─── GET /api/auth/users ──────────────────────────────────────────────────────
+// Returns active users for assignment dropdowns (e.g. Work Order "Assign To").
+// Accessible to any authenticated role; never exposes password hashes.
+router.get('/users', authenticate, async (_req: AuthenticatedRequest, res: Response) => {
+  const users = await prisma.user.findMany({
+    where: { isActive: true },
+    select: { id: true, name: true, email: true, role: true },
+    orderBy: { name: 'asc' },
+  });
+  return res.json({ success: true, data: users });
+});
+
 export default router;
